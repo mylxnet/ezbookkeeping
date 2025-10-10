@@ -1,0 +1,82 @@
+二、创建docker-compose.yml文件
+登录服务器使用root账户执行以下步骤
+
+创建一个目录，并进入此目录
+
+mkdir  ezbookkeeping;cd ezbookkeeping 
+先创建3个子目录
+
+mkdir ./{data,log,storage}
+在给设置部分权限
+
+chmod -R a+rw {log,storage}
+然后再新建docker-compose.yml
+
+vim docker-compose.yml
+
+services:
+  ezbookkeeping:    # EzBookkeeping 服务，用于记账应用
+    image: mayswind/ezbookkeeping  # 使用 mayswind/ezbookkeeping 镜像
+    container_name: ezbookkeeping  # 容器名称为 ezbookkeeping
+    restart: always  # 容器总是重启
+    ports:
+      - 3080:8080  # 将容器的 8080 端口映射到主机的 3080 端口
+    volumes:
+      - /etc/localtime:/etc/localtime:ro  # 将主机的本地时间同步到容器
+      - ./storage:/ezbookkeeping/storage  # 持久化存储到主机的 ./storage 文件夹
+      - ./log:/ezbookkeeping/log  # 持久化日志到主机的 ./log 文件夹
+    environment:
+      - EBK_DATABASE_TYPE=mysql  # 数据库类型为 MySQL
+      - EBK_DATABASE_HOST=mysql:3306  # 数据库主机为 mysql 服务，端口为 3306
+      - EBK_DATABASE_NAME=ezbookkeeping  # 数据库名称为 ezbookkeeping
+      - EBK_DATABASE_USER=ezbookkeeping  # 数据库用户名为 ezbookkeeping
+      - EBK_DATABASE_PASSWD=ezbookkeeping  # 数据库密码为 ezbookkeeping
+      - EBK_LOG_MODE=file  # 日志模式为文件
+      - EBK_SECURITY_SECRET_KEY=O0rxWj8gH8z2T9O79l8ndUczIHtUgV6bRY3CZfF0beE=   #设置随机的安全密钥
+      - EBK_MCP_ENABLE_MCP=true  # 启用 MCP 功能
+    depends_on:
+      - mysql  # 在 mysql 服务启动后再启动 ezbookkeeping 服务
+  mysql:           # MySQL 服务，用于存储 EzBookkeeping 数据
+    image: mysql:8.0  # 使用官方的 MySQL 8.0 镜像
+    container_name: ezbookkeeping-mysql  # 容器名称为 ezbookkeeping-mysql
+    restart: always  # 容器总是重启
+    volumes:
+      - ./data:/var/lib/mysql  # 将主机的 ./data 文件夹映射到容器的 /var/lib/mysql 目录，用于持久化数据库数据
+    environment:
+      - MYSQL_DATABASE=ezbookkeeping  # 默认数据库为 ezbookkeeping
+      - MYSQL_USER=ezbookkeeping  # 数据库用户名为 ezbookkeeping
+      - MYSQL_PASSWORD=ezbookkeeping  # 数据库密码为 ezbookkeeping
+      - MYSQL_ROOT_PASSWORD=ezbookkeeping  # MySQL 根密码为 ezbookkeeping
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-p ezbookkeeping"]  # 检查 MySQL 是否正常运行
+      retries: 3  # 如果健康检查失败，最多重试 3 次
+      timeout: 5s  # 每次健康检查的超时时间为 5 秒
+
+三、执行容器运行命令
+docker-compose up -d #运行容器
+注意第一次运行由于需要创建数据库相关数据会需要一点时间大约5分钟左右，等待mysql初始化完成在执行以下信息查看是否正常
+
+然后停止下
+
+docker-compose down #运行容器
+如果一直不行可以在执行下权限的操作
+
+chmod -R a+rw {log,storage}
+可以先看下MySQL是否初始化成功
+
+ docker-compose logs mysql
+
+
+docker-compose ps  #查看是否开启成功
+正常启动如下所示
+
+ docker-compose ps
+NAME                  IMAGE                    COMMAND                  SERVICE         CREATED          STATUS                    PORTS
+ezbookkeeping         mayswind/ezbookkeeping   "/docker-entrypoint.…"   ezbookkeeping   33 minutes ago   Up 32 minutes             0.0.0.0:3080->8080/tcp, [::]:3080->8080/tcp
+ezbookkeeping-mysql   mysql:8.0                "docker-entrypoint.s…"   mysql           33 minutes ago   Up 33 minutes (healthy)   3306/tcp, 33060/tcp
+四、打开web页面使用
+成功以后需要打开自己相应的端口3080)防火墙就可以web端访问了
+
+主界面
+http://ip:3080
+进入登录界面
