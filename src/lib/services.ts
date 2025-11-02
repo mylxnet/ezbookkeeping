@@ -61,6 +61,7 @@ import type {
 import type {
     TransactionCreateRequest,
     TransactionModifyRequest,
+    TransactionMoveBetweenAccountsRequest,
     TransactionDeleteRequest,
     TransactionImportRequest,
     TransactionListByMaxTimeRequest,
@@ -134,6 +135,13 @@ import type {
     UserProfileUpdateRequest,
     UserProfileUpdateResponse
 } from '@/models/user.ts';
+import type {
+    UserExternalAuthUnlinkRequest,
+    UserExternalAuthInfoResponse
+} from '@/models/user_external_auth.ts';
+import type {
+    OAuth2CallbackLoginRequest
+} from '@/models/oauth2.ts';
 import type {
     UserApplicationCloudSettingsUpdateRequest
 } from '@/models/user_app_cloud_setting.ts';
@@ -250,19 +258,35 @@ export default {
         return axios.post<ApiResponse<AuthResponse>>('2fa/authorize.json', {
             passcode: passcode
         }, {
+            noAuth: true,
             headers: {
                 Authorization: `Bearer ${token}`
             }
-        });
+        } as ApiRequestConfig);
     },
     authorize2FAByBackupCode: ({ recoveryCode, token }: { recoveryCode: string, token: string }): ApiResponsePromise<AuthResponse> => {
         return axios.post<ApiResponse<AuthResponse>>('2fa/recovery.json', {
             recoveryCode: recoveryCode
         }, {
+            noAuth: true,
             headers: {
                 Authorization: `Bearer ${token}`
             }
-        });
+        } as ApiRequestConfig);
+    },
+    authorizeOAuth2: ({ password, passcode, callbackToken }: { password?: string, passcode?: string, callbackToken: string }): ApiResponsePromise<AuthResponse> => {
+        const req: OAuth2CallbackLoginRequest = {
+            password,
+            passcode,
+            token: getCurrentToken() || undefined
+        };
+
+        return axios.post<ApiResponse<AuthResponse>>('oauth2/authorize.json', req, {
+            noAuth: true,
+            headers: {
+                Authorization: `Bearer ${callbackToken}`
+            }
+        } as ApiRequestConfig);
     },
     register: (req: UserRegisterRequest): ApiResponsePromise<RegisterResponse> => {
         return axios.post<ApiResponse<RegisterResponse>>('register.json', req);
@@ -311,6 +335,12 @@ export default {
                 blockedRequests.length = 0;
             });
         });
+    },
+    getExternalAuths: (): ApiResponsePromise<UserExternalAuthInfoResponse[]> => {
+        return axios.get<ApiResponse<UserExternalAuthInfoResponse[]>>('v1/users/external_auth/list.json');
+    },
+    unlinkExternalAuth: (req: UserExternalAuthUnlinkRequest): ApiResponsePromise<boolean> => {
+        return axios.post<ApiResponse<boolean>>('v1/users/external_auth/unlink.json', req);
     },
     getTokens: (): ApiResponsePromise<TokenInfoResponse[]> => {
         return axios.get<ApiResponse<TokenInfoResponse[]>>('v1/tokens/list.json');
@@ -528,6 +558,9 @@ export default {
     modifyTransaction: (req: TransactionModifyRequest): ApiResponsePromise<TransactionInfoResponse> => {
         return axios.post<ApiResponse<TransactionInfoResponse>>('v1/transactions/modify.json', req);
     },
+    moveAllTransactionsBetweenAccounts: (req: TransactionMoveBetweenAccountsRequest): ApiResponsePromise<boolean> => {
+        return axios.post<ApiResponse<boolean>>('v1/transactions/move/all.json', req);
+    },
     deleteTransaction: (req: TransactionDeleteRequest): ApiResponsePromise<boolean> => {
         return axios.post<ApiResponse<boolean>>('v1/transactions/delete.json', req);
     },
@@ -690,6 +723,12 @@ export default {
     },
     cancelRequest: (cancelableUuid: string) => {
         cancelableRequests[cancelableUuid] = true;
+    },
+    generateOAuth2LoginUrl: (platform: 'mobile' | 'desktop', clientSessionId: string): string => {
+        return `${getBasePath()}/oauth2/login?platform=${platform}&client_session_id=${clientSessionId}`;
+    },
+    generateOAuth2LinkUrl: (platform: 'mobile' | 'desktop', clientSessionId: string): string => {
+        return `${getBasePath()}/oauth2/login?platform=${platform}&client_session_id=${clientSessionId}&token=${getCurrentToken()}`;
     },
     generateQrCodeUrl: (qrCodeName: string): string => {
         return `${getBasePath()}${BASE_QRCODE_PATH}/${qrCodeName}.png`;

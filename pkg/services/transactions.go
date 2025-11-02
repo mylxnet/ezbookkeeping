@@ -1168,6 +1168,219 @@ func (s *TransactionService) ModifyTransaction(c core.Context, transaction *mode
 	return nil
 }
 
+func (s *TransactionService) MoveAllTransactionsBetweenAccounts(c core.Context, uid int64, fromAccountId int64, toAccountId int64) error {
+	if uid <= 0 {
+		return errs.ErrUserIdInvalid
+	}
+
+	if fromAccountId <= 0 || toAccountId <= 0 {
+		return errs.ErrAccountIdInvalid
+	}
+
+	if fromAccountId == toAccountId {
+		return errs.ErrCannotMoveTransactionToSameAccount
+	}
+
+	return s.UserDataDB(uid).DoTransaction(c, func(sess *xorm.Session) error {
+		// get and verify from and to account
+		fromAccount := &models.Account{}
+		has, err := sess.ID(fromAccountId).Where("uid=? AND deleted=?", uid, false).Get(fromAccount)
+
+		if err != nil {
+			return err
+		} else if !has {
+			return errs.ErrAccountNotFound
+		}
+
+		toAccount := &models.Account{}
+		has, err = sess.ID(toAccountId).Where("uid=? AND deleted=?", uid, false).Get(toAccount)
+
+		if err != nil {
+			return err
+		} else if !has {
+			return errs.ErrAccountNotFound
+		}
+
+		if fromAccount.Hidden || toAccount.Hidden {
+			return errs.ErrCannotMoveTransactionFromOrToHiddenAccount
+		}
+
+		if fromAccount.Type == models.ACCOUNT_TYPE_MULTI_SUB_ACCOUNTS || toAccount.Type == models.ACCOUNT_TYPE_MULTI_SUB_ACCOUNTS {
+			return errs.ErrCannotMoveTransactionFromOrToParentAccount
+		}
+
+		if fromAccount.Currency != toAccount.Currency {
+			return errs.ErrCannotMoveTransactionBetweenAccountsWithDifferentCurrencies
+		}
+
+		// combine balance modification transaction
+		var balanceModificationTransactions []*models.Transaction
+		err = sess.Where("uid=? AND deleted=? AND type=? AND (account_id=? OR account_id=?)", uid, false, models.TRANSACTION_DB_TYPE_MODIFY_BALANCE, fromAccountId, toAccountId).Find(&balanceModificationTransactions)
+
+		if err != nil {
+			return err
+		}
+
+		if len(balanceModificationTransactions) > 2 {
+			log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has more than 2 balance modification transactions in account \"id:%d\" and account \"id:%d\", cannot combine balance modification transaction", uid, fromAccountId, toAccountId)
+			return errs.ErrOperationFailed
+		} else if len(balanceModificationTransactions) == 2 && balanceModificationTransactions[0].AccountId != balanceModificationTransactions[1].AccountId {
+			// if two balance modification transactions exist, merge the amounts into the earlier one and delete the later transaction
+			var earlierTransaction *models.Transaction
+			var laterTransaction *models.Transaction
+
+			if balanceModificationTransactions[0].TransactionTime < balanceModificationTransactions[1].TransactionTime {
+				earlierTransaction = balanceModificationTransactions[0]
+				laterTransaction = balanceModificationTransactions[1]
+			} else {
+				earlierTransaction = balanceModificationTransactions[1]
+				laterTransaction = balanceModificationTransactions[0]
+			}
+
+			earlierTransaction.Amount += laterTransaction.Amount
+			earlierTransaction.RelatedAccountAmount += laterTransaction.RelatedAccountAmount
+			earlierTransaction.UpdatedUnixTime = time.Now().Unix()
+
+			updatedRows, err := sess.ID(earlierTransaction.TransactionId).Cols("amount", "related_account_amount", "updated_unix_time").Where("uid=? AND deleted=?", uid, false).Update(earlierTransaction)
+
+			if err != nil {
+				return err
+			} else if updatedRows < 1 {
+				log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] failed to update earlier balance modification transaction")
+				return errs.ErrDatabaseOperationFailed
+			}
+
+			laterTransaction.Deleted = true
+			laterTransaction.DeletedUnixTime = time.Now().Unix()
+
+			deletedRows, err := sess.ID(laterTransaction.TransactionId).Cols("deleted", "deleted_unix_time").Where("uid=? AND deleted=?", uid, false).Update(laterTransaction)
+
+			if err != nil {
+				return err
+			} else if deletedRows < 1 {
+				log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] failed to delete later balance modification transaction")
+				return errs.ErrDatabaseOperationFailed
+			}
+
+			log.Infof(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has combined two balance modification transactions \"id:%d\" and \"id:%d\", retained transaction is \"id:%d\"", uid, earlierTransaction.TransactionId, laterTransaction.TransactionId, earlierTransaction.TransactionId)
+		} else if len(balanceModificationTransactions) == 1 {
+			// when merging a new balance modification transaction, if its date is later than the account's earliest transaction, update the balance modification transaction time accordingly
+			anotherAccountId := int64(0)
+
+			if balanceModificationTransactions[0].AccountId == fromAccountId {
+				anotherAccountId = toAccountId
+			} else if balanceModificationTransactions[0].AccountId == toAccountId {
+				anotherAccountId = fromAccountId
+			} else {
+				log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has a balance modification transaction \"id:%d\" which account id is neither \"%d\" nor \"%d\"", uid, balanceModificationTransactions[0].TransactionId, fromAccountId, toAccountId)
+				return errs.ErrOperationFailed
+			}
+
+			earliestTransaction := &models.Transaction{}
+			has, err := sess.Where("uid=? AND deleted=? AND account_id=?", uid, false, anotherAccountId).OrderBy("transaction_time asc").Limit(1).Get(earliestTransaction)
+
+			if err != nil {
+				return err
+			} else if has && balanceModificationTransactions[0].TransactionTime > earliestTransaction.TransactionTime {
+				balanceModificationTransaction := balanceModificationTransactions[0]
+				balanceModificationTransaction.TransactionTime = utils.GetMinTransactionTimeFromUnixTime(utils.GetUnixTimeFromTransactionTime(earliestTransaction.TransactionTime) - 1)
+				balanceModificationTransaction.UpdatedUnixTime = time.Now().Unix()
+
+				if balanceModificationTransaction.TransactionTime < 0 {
+					balanceModificationTransaction.TransactionTime = 0
+				}
+
+				updatedRows, err := sess.ID(balanceModificationTransaction.TransactionId).Cols("transaction_time", "updated_unix_time").Where("uid=? AND deleted=?", uid, false).Update(balanceModificationTransaction)
+
+				if err != nil {
+					return err
+				} else if updatedRows < 1 {
+					log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] failed to update balance modification transaction time")
+					return errs.ErrDatabaseOperationFailed
+				}
+
+				log.Infof(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has updated balance modification transaction \"id:%d\" time to %d, because earliest transaction time in account \"id:%d\" is %d", uid, balanceModificationTransaction.TransactionId, balanceModificationTransaction.TransactionTime, toAccountId, earliestTransaction.TransactionTime)
+			}
+		}
+
+		// update all transactions of from account
+		updateModel := &models.Transaction{
+			AccountId:       toAccountId,
+			UpdatedUnixTime: time.Now().Unix(),
+		}
+
+		updatedRows, err := sess.Cols("account_id", "updated_unix_time").Where("uid=? AND deleted=? AND account_id=?", uid, false, fromAccountId).Update(updateModel)
+
+		if err != nil {
+			return err
+		}
+
+		if updatedRows > 0 {
+			log.Infof(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has moved %d transactions from account \"id:%d\" to account \"id:%d\"", uid, updatedRows, fromAccountId, toAccountId)
+		}
+
+		// update all related transactions of from account
+		updateRelatedModel := &models.Transaction{
+			RelatedAccountId: toAccountId,
+			UpdatedUnixTime:  time.Now().Unix(),
+		}
+
+		relatedUpdatedRows, err := sess.Cols("related_account_id", "updated_unix_time").Where("uid=? AND deleted=? AND related_account_id=?", uid, false, fromAccountId).Update(updateRelatedModel)
+
+		if err != nil {
+			return err
+		}
+
+		if updatedRows > 0 {
+			log.Infof(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has moved %d related transactions from account \"id:%d\" to account \"id:%d\"", uid, relatedUpdatedRows, fromAccountId, toAccountId)
+		}
+
+		// delete all transfer transactions which related account id and account id are both
+		deletedModel := &models.Transaction{
+			Deleted:         true,
+			DeletedUnixTime: time.Now().Unix(),
+		}
+
+		deletedRows, err := sess.Cols("deleted", "deleted_unix_time").Where("uid=? AND deleted=? AND (type=? OR type=?) AND account_id=? AND related_account_id=?", uid, false, models.TRANSACTION_DB_TYPE_TRANSFER_OUT, models.TRANSACTION_DB_TYPE_TRANSFER_IN, toAccountId, toAccountId).Update(deletedModel)
+
+		if err != nil {
+			return err
+		}
+
+		if deletedRows > 0 {
+			log.Infof(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has deleted %d transactions which account id and related account id are both \"%d\"", uid, deletedRows, toAccountId)
+		}
+
+		// update account balance
+		if fromAccount.Balance != 0 {
+			toAccount.UpdatedUnixTime = time.Now().Unix()
+			updatedRows, err := sess.ID(toAccount.AccountId).SetExpr("balance", fmt.Sprintf("balance+(%d)", fromAccount.Balance)).Cols("updated_unix_time").Where("uid=? AND deleted=?", uid, false).Update(toAccount)
+
+			if err != nil {
+				return err
+			} else if updatedRows < 1 {
+				log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] failed to update to account balance")
+				return errs.ErrDatabaseOperationFailed
+			}
+
+			log.Infof(c, "[transactions.MoveAllTransactionsBetweenAccounts] user \"uid:%d\" has updated account \"id:%d\" balance from %d to %d", uid, toAccountId, toAccount.Balance, toAccount.Balance+fromAccount.Balance)
+
+			fromAccount.Balance = 0
+			fromAccount.UpdatedUnixTime = time.Now().Unix()
+			updatedRows, err = sess.ID(fromAccount.AccountId).Cols("balance", "updated_unix_time").Where("uid=? AND deleted=?", fromAccount.Uid, false).Update(fromAccount)
+
+			if err != nil {
+				return err
+			} else if updatedRows < 1 {
+				log.Errorf(c, "[transactions.MoveAllTransactionsBetweenAccounts] failed to update from account balance")
+				return errs.ErrDatabaseOperationFailed
+			}
+		}
+
+		return nil
+	})
+}
+
 // DeleteTransaction deletes an existed transaction from database
 func (s *TransactionService) DeleteTransaction(c core.Context, uid int64, transactionId int64) error {
 	if uid <= 0 {
@@ -1583,8 +1796,8 @@ func (s *TransactionService) GetAccountsTotalIncomeAndExpense(c core.Context, ui
 	return incomeAmounts, expenseAmounts, nil
 }
 
-// GetAccountsAndCategoriesTotalIncomeAndExpense returns the every accounts and categories total income and expense amount by specific date range
-func (s *TransactionService) GetAccountsAndCategoriesTotalIncomeAndExpense(c core.Context, uid int64, startUnixTime int64, endUnixTime int64, tagIds []int64, noTags bool, tagFilterType models.TransactionTagFilterType, keyword string, utcOffset int16, useTransactionTimezone bool) ([]*models.Transaction, error) {
+// GetAccountsAndCategoriesTotalInflowAndOutflow returns the every accounts and categories total inflows and outflows amount by specific date range
+func (s *TransactionService) GetAccountsAndCategoriesTotalInflowAndOutflow(c core.Context, uid int64, startUnixTime int64, endUnixTime int64, tagIds []int64, noTags bool, tagFilterType models.TransactionTagFilterType, keyword string, utcOffset int16, useTransactionTimezone bool) ([]*models.Transaction, error) {
 	if uid <= 0 {
 		return nil, errs.ErrUserIdInvalid
 	}
@@ -1604,12 +1817,14 @@ func (s *TransactionService) GetAccountsAndCategoriesTotalIncomeAndExpense(c cor
 		endTransactionTime = utils.GetMaxTransactionTimeFromUnixTime(endUnixTime)
 	}
 
-	condition := "uid=? AND deleted=? AND (type=? OR type=?)"
-	conditionParams := make([]any, 0, 4)
+	condition := "uid=? AND deleted=? AND (type=? OR type=? OR type=? OR type=?)"
+	conditionParams := make([]any, 0, 6)
 	conditionParams = append(conditionParams, uid)
 	conditionParams = append(conditionParams, false)
 	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_INCOME)
 	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_EXPENSE)
+	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_TRANSFER_OUT)
+	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_TRANSFER_IN)
 
 	minTransactionTime := startTransactionTime
 	maxTransactionTime := endTransactionTime
@@ -1637,7 +1852,7 @@ func (s *TransactionService) GetAccountsAndCategoriesTotalIncomeAndExpense(c cor
 			finalConditionParams = append(finalConditionParams, "%%"+keyword+"%%")
 		}
 
-		sess := s.UserDataDB(uid).NewSession(c).Select("category_id, account_id, transaction_time, timezone_utc_offset, amount").Where(finalCondition, finalConditionParams...)
+		sess := s.UserDataDB(uid).NewSession(c).Select("type, category_id, account_id, related_account_id, transaction_time, timezone_utc_offset, amount").Where(finalCondition, finalConditionParams...)
 		sess = s.appendFilterTagIdsConditionToQuery(sess, uid, maxTransactionTime, minTransactionTime, tagIds, noTags, tagFilterType)
 
 		err := sess.Limit(pageCountForLoadTransactionAmounts, 0).OrderBy("transaction_time desc").Find(&transactions)
@@ -1673,13 +1888,20 @@ func (s *TransactionService) GetAccountsAndCategoriesTotalIncomeAndExpense(c cor
 		}
 
 		groupKey := fmt.Sprintf("%d_%d", transaction.CategoryId, transaction.AccountId)
+
+		if transaction.Type == models.TRANSACTION_DB_TYPE_TRANSFER_OUT || transaction.Type == models.TRANSACTION_DB_TYPE_TRANSFER_IN {
+			groupKey = fmt.Sprintf("%d_%d_%d_%d", transaction.CategoryId, transaction.AccountId, transaction.RelatedAccountId, transaction.Type)
+		}
+
 		totalAmounts, exists := transactionTotalAmountsMap[groupKey]
 
 		if !exists {
 			totalAmounts = &models.Transaction{
-				CategoryId: transaction.CategoryId,
-				AccountId:  transaction.AccountId,
-				Amount:     0,
+				Type:             transaction.Type,
+				CategoryId:       transaction.CategoryId,
+				AccountId:        transaction.AccountId,
+				RelatedAccountId: transaction.RelatedAccountId,
+				Amount:           0,
 			}
 
 			transactionTotalAmountsMap[groupKey] = totalAmounts
@@ -1697,8 +1919,8 @@ func (s *TransactionService) GetAccountsAndCategoriesTotalIncomeAndExpense(c cor
 	return transactionTotalAmounts, nil
 }
 
-// GetAccountsAndCategoriesMonthlyIncomeAndExpense returns the every accounts monthly income and expense amount by specific date range
-func (s *TransactionService) GetAccountsAndCategoriesMonthlyIncomeAndExpense(c core.Context, uid int64, startYear int32, startMonth int32, endYear int32, endMonth int32, tagIds []int64, noTags bool, tagFilterType models.TransactionTagFilterType, keyword string, utcOffset int16, useTransactionTimezone bool) (map[int32][]*models.Transaction, error) {
+// GetAccountsAndCategoriesMonthlyInflowAndOutflow returns the every accounts monthly inflows and outflows amount by specific date range
+func (s *TransactionService) GetAccountsAndCategoriesMonthlyInflowAndOutflow(c core.Context, uid int64, startYear int32, startMonth int32, endYear int32, endMonth int32, tagIds []int64, noTags bool, tagFilterType models.TransactionTagFilterType, keyword string, utcOffset int16, useTransactionTimezone bool) (map[int32][]*models.Transaction, error) {
 	if uid <= 0 {
 		return nil, errs.ErrUserIdInvalid
 	}
@@ -1723,12 +1945,14 @@ func (s *TransactionService) GetAccountsAndCategoriesMonthlyIncomeAndExpense(c c
 		}
 	}
 
-	condition := "uid=? AND deleted=? AND (type=? OR type=?)"
-	conditionParams := make([]any, 0, 4)
+	condition := "uid=? AND deleted=? AND (type=? OR type=? OR type=? OR type=?)"
+	conditionParams := make([]any, 0, 6)
 	conditionParams = append(conditionParams, uid)
 	conditionParams = append(conditionParams, false)
 	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_INCOME)
 	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_EXPENSE)
+	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_TRANSFER_OUT)
+	conditionParams = append(conditionParams, models.TRANSACTION_DB_TYPE_TRANSFER_IN)
 
 	minTransactionTime := startTransactionTime
 	maxTransactionTime := endTransactionTime
@@ -1756,7 +1980,7 @@ func (s *TransactionService) GetAccountsAndCategoriesMonthlyIncomeAndExpense(c c
 			finalConditionParams = append(finalConditionParams, "%%"+keyword+"%%")
 		}
 
-		sess := s.UserDataDB(uid).NewSession(c).Select("category_id, account_id, transaction_time, timezone_utc_offset, amount").Where(finalCondition, finalConditionParams...)
+		sess := s.UserDataDB(uid).NewSession(c).Select("type, category_id, account_id, related_account_id, transaction_time, timezone_utc_offset, amount").Where(finalCondition, finalConditionParams...)
 		sess = s.appendFilterTagIdsConditionToQuery(sess, uid, maxTransactionTime, minTransactionTime, tagIds, noTags, tagFilterType)
 
 		err := sess.Limit(pageCountForLoadTransactionAmounts, 0).OrderBy("transaction_time desc").Find(&transactions)
@@ -1795,13 +2019,22 @@ func (s *TransactionService) GetAccountsAndCategoriesMonthlyIncomeAndExpense(c c
 		}
 
 		groupKey := fmt.Sprintf("%d_%d_%d", yearMonth, transaction.CategoryId, transaction.AccountId)
+
+		if transaction.Type == models.TRANSACTION_DB_TYPE_TRANSFER_OUT || transaction.Type == models.TRANSACTION_DB_TYPE_TRANSFER_IN {
+			groupKey = fmt.Sprintf("%d_%d_%d_%d_%d", yearMonth, transaction.CategoryId, transaction.AccountId, transaction.RelatedAccountId, transaction.Type)
+		}
+
 		transactionAmounts, exists := transactionsMonthlyAmountsMap[groupKey]
 
 		if !exists {
 			transactionAmounts = &models.Transaction{
-				CategoryId: transaction.CategoryId,
-				AccountId:  transaction.AccountId,
+				Type:             transaction.Type,
+				CategoryId:       transaction.CategoryId,
+				AccountId:        transaction.AccountId,
+				RelatedAccountId: transaction.RelatedAccountId,
+				Amount:           0,
 			}
+
 			transactionsMonthlyAmountsMap[groupKey] = transactionAmounts
 		}
 

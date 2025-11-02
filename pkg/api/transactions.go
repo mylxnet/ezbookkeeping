@@ -426,7 +426,7 @@ func (a *TransactionsApi) TransactionStatisticsHandler(c *core.WebContext) (any,
 	}
 
 	uid := c.GetCurrentUid()
-	totalAmounts, err := a.transactions.GetAccountsAndCategoriesTotalIncomeAndExpense(c, uid, statisticReq.StartTime, statisticReq.EndTime, allTagIds, noTags, statisticReq.TagFilterType, statisticReq.Keyword, utcOffset, statisticReq.UseTransactionTimezone)
+	totalAmounts, err := a.transactions.GetAccountsAndCategoriesTotalInflowAndOutflow(c, uid, statisticReq.StartTime, statisticReq.EndTime, allTagIds, noTags, statisticReq.TagFilterType, statisticReq.Keyword, utcOffset, statisticReq.UseTransactionTimezone)
 
 	if err != nil {
 		log.Errorf(c, "[transactions.TransactionStatisticsHandler] failed to get accounts and categories total income and expense for user \"uid:%d\", because %s", uid, err.Error())
@@ -446,6 +446,11 @@ func (a *TransactionsApi) TransactionStatisticsHandler(c *core.WebContext) (any,
 			CategoryId:  totalAmountItem.CategoryId,
 			AccountId:   totalAmountItem.AccountId,
 			TotalAmount: totalAmountItem.Amount,
+		}
+
+		if totalAmountItem.Type == models.TRANSACTION_DB_TYPE_TRANSFER_OUT || totalAmountItem.Type == models.TRANSACTION_DB_TYPE_TRANSFER_IN {
+			statisticResp.Items[i].RelatedAccountId = totalAmountItem.RelatedAccountId
+			statisticResp.Items[i].RelatedAccountType, _ = totalAmountItem.Type.ToTransactionRelatedAccountType()
 		}
 	}
 
@@ -489,7 +494,7 @@ func (a *TransactionsApi) TransactionStatisticsTrendsHandler(c *core.WebContext)
 	}
 
 	uid := c.GetCurrentUid()
-	allMonthlyTotalAmounts, err := a.transactions.GetAccountsAndCategoriesMonthlyIncomeAndExpense(c, uid, startYear, startMonth, endYear, endMonth, allTagIds, noTags, statisticTrendsReq.TagFilterType, statisticTrendsReq.Keyword, utcOffset, statisticTrendsReq.UseTransactionTimezone)
+	allMonthlyTotalAmounts, err := a.transactions.GetAccountsAndCategoriesMonthlyInflowAndOutflow(c, uid, startYear, startMonth, endYear, endMonth, allTagIds, noTags, statisticTrendsReq.TagFilterType, statisticTrendsReq.Keyword, utcOffset, statisticTrendsReq.UseTransactionTimezone)
 
 	if err != nil {
 		log.Errorf(c, "[transactions.TransactionStatisticsTrendsHandler] failed to get accounts and categories total income and expense for user \"uid:%d\", because %s", uid, err.Error())
@@ -511,6 +516,11 @@ func (a *TransactionsApi) TransactionStatisticsTrendsHandler(c *core.WebContext)
 				CategoryId:  totalAmountItem.CategoryId,
 				AccountId:   totalAmountItem.AccountId,
 				TotalAmount: totalAmountItem.Amount,
+			}
+
+			if totalAmountItem.Type == models.TRANSACTION_DB_TYPE_TRANSFER_OUT || totalAmountItem.Type == models.TRANSACTION_DB_TYPE_TRANSFER_IN {
+				monthlyStatisticResp.Items[i].RelatedAccountId = totalAmountItem.RelatedAccountId
+				monthlyStatisticResp.Items[i].RelatedAccountType, _ = totalAmountItem.Type.ToTransactionRelatedAccountType()
 			}
 		}
 
@@ -1112,6 +1122,63 @@ func (a *TransactionsApi) TransactionModifyHandler(c *core.WebContext) (any, *er
 	newTransactionResp.Pictures = a.GetTransactionPictureInfoResponseList(newPictureInfos)
 
 	return newTransactionResp, nil
+}
+
+// TransactionMoveAllBetweenAccountsHandler moves all transactions from one account to another account for current user
+func (a *TransactionsApi) TransactionMoveAllBetweenAccountsHandler(c *core.WebContext) (any, *errs.Error) {
+	var transactionMoveReq models.TransactionMoveBetweenAccountsRequest
+	err := c.ShouldBindJSON(&transactionMoveReq)
+
+	if err != nil {
+		log.Warnf(c, "[transactions.TransactionMoveAllBetweenAccountsHandler] parse request failed, because %s", err.Error())
+		return nil, errs.NewIncompleteOrIncorrectSubmissionError(err)
+	}
+
+	if transactionMoveReq.FromAccountId == transactionMoveReq.ToAccountId {
+		return nil, errs.ErrCannotMoveTransactionToSameAccount
+	}
+
+	uid := c.GetCurrentUid()
+	accountMap, err := a.accounts.GetAccountsByAccountIds(c, uid, []int64{transactionMoveReq.FromAccountId, transactionMoveReq.ToAccountId})
+
+	if err != nil {
+		log.Errorf(c, "[transactions.TransactionMoveAllBetweenAccountsHandler] failed to get accounts for user \"uid:%d\", because %s", uid, err.Error())
+		return nil, errs.Or(err, errs.ErrOperationFailed)
+	}
+
+	fromAccount, exists := accountMap[transactionMoveReq.FromAccountId]
+
+	if !exists {
+		return nil, errs.ErrSourceAccountNotFound
+	}
+
+	toAccount, exists := accountMap[transactionMoveReq.ToAccountId]
+
+	if !exists {
+		return nil, errs.ErrDestinationAccountNotFound
+	}
+
+	if fromAccount.Hidden || toAccount.Hidden {
+		return nil, errs.ErrCannotMoveTransactionFromOrToHiddenAccount
+	}
+
+	if fromAccount.Type == models.ACCOUNT_TYPE_MULTI_SUB_ACCOUNTS || toAccount.Type == models.ACCOUNT_TYPE_MULTI_SUB_ACCOUNTS {
+		return nil, errs.ErrCannotMoveTransactionFromOrToParentAccount
+	}
+
+	if fromAccount.Currency != toAccount.Currency {
+		return nil, errs.ErrCannotMoveTransactionBetweenAccountsWithDifferentCurrencies
+	}
+
+	err = a.transactions.MoveAllTransactionsBetweenAccounts(c, uid, transactionMoveReq.FromAccountId, transactionMoveReq.ToAccountId)
+
+	if err != nil {
+		log.Errorf(c, "[transactions.TransactionMoveAllBetweenAccountsHandler] failed to move all transactions from account \"id:%d\" to account \"id:%d\" for user \"uid:%d\", because %s", transactionMoveReq.FromAccountId, transactionMoveReq.ToAccountId, uid, err.Error())
+		return nil, errs.Or(err, errs.ErrOperationFailed)
+	}
+
+	log.Infof(c, "[transactions.TransactionMoveAllBetweenAccountsHandler] user \"uid:%d\" has moved all transactions from account \"id:%d\" to account \"id:%d\" successfully", uid, transactionMoveReq.FromAccountId, transactionMoveReq.ToAccountId)
+	return true, nil
 }
 
 // TransactionDeleteHandler deletes an existed transaction by request parameters for current user

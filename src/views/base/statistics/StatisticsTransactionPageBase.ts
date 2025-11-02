@@ -9,11 +9,18 @@ import { type TransactionStatisticsFilter, useStatisticsStore } from '@/stores/s
 import type { TypeAndDisplayName } from '@/core/base.ts';
 import { type LocalizedDateRange, type WeekDayValue, DateRangeScene, DateRange } from '@/core/datetime.ts';
 import type { ColorStyleValue } from '@/core/color.ts';
-import { StatisticsAnalysisType, ChartDataType, ChartSortingType, ChartDateAggregationType } from '@/core/statistics.ts';
+import {
+    StatisticsAnalysisType,
+    ChartDataType,
+    ChartSortingType,
+    ChartDateAggregationType,
+    TrendChartType
+} from '@/core/statistics.ts';
 
 import { DISPLAY_HIDDEN_AMOUNT } from '@/consts/numeral.ts';
 
 import type {
+    TransactionCategoricalOverviewAnalysisData,
     TransactionCategoricalAnalysisData,
     TransactionCategoricalAnalysisDataItem,
     TransactionTrendsAnalysisData
@@ -156,6 +163,30 @@ export function useStatisticsTransactionPageBase() {
         }
     });
 
+    const canUseCategoryFilter = computed<boolean>(() => {
+        if (query.value.chartDataType === ChartDataType.AccountTotalAssets.type || query.value.chartDataType === ChartDataType.AccountTotalLiabilities.type) {
+            return false;
+        }
+
+        return true;
+    });
+
+    const canUseTagFilter = computed<boolean>(() => {
+        if (query.value.chartDataType === ChartDataType.AccountTotalAssets.type || query.value.chartDataType === ChartDataType.AccountTotalLiabilities.type) {
+            return false;
+        }
+
+        return true;
+    });
+
+    const canUseKeywordFilter = computed<boolean>(() => {
+        if (query.value.chartDataType === ChartDataType.AccountTotalAssets.type || query.value.chartDataType === ChartDataType.AccountTotalLiabilities.type) {
+            return false;
+        }
+
+        return true;
+    });
+
     const showAmountInChart = computed<boolean>(() => {
         if (!showAccountBalance.value
             && (query.value.chartDataType === ChartDataType.AccountTotalAssets.type || query.value.chartDataType === ChartDataType.AccountTotalLiabilities.type)) {
@@ -166,7 +197,11 @@ export function useStatisticsTransactionPageBase() {
     });
 
     const totalAmountName = computed<string>(() => {
-        if (query.value.chartDataType === ChartDataType.IncomeByAccount.type
+        if (query.value.chartDataType === ChartDataType.InflowsByAccount.type) {
+            return tt('Total Inflows');
+        } else if (query.value.chartDataType === ChartDataType.OutflowsByAccount.type) {
+            return tt('Total Outflows');
+        } else if (query.value.chartDataType === ChartDataType.IncomeByAccount.type
             || query.value.chartDataType === ChartDataType.IncomeByPrimaryCategory.type
             || query.value.chartDataType === ChartDataType.IncomeBySecondaryCategory.type) {
             return tt('Total Income');
@@ -183,18 +218,38 @@ export function useStatisticsTransactionPageBase() {
         return tt('Total Amount');
     });
 
+    const showPercentInCategoricalChart = computed<boolean>(() => {
+        return query.value.chartDataType !== ChartDataType.OutflowsByAccount.type &&
+            query.value.chartDataType !== ChartDataType.InflowsByAccount.type;
+    });
+
     const showTotalAmountInTrendsChart = computed<boolean>(() => {
-        return query.value.chartDataType !== ChartDataType.TotalExpense.type &&
+        return query.value.chartDataType !== ChartDataType.OutflowsByAccount.type &&
+            query.value.chartDataType !== ChartDataType.InflowsByAccount.type &&
+            query.value.chartDataType !== ChartDataType.TotalOutflows.type &&
+            query.value.chartDataType !== ChartDataType.TotalExpense.type &&
+            query.value.chartDataType !== ChartDataType.TotalInflows.type &&
             query.value.chartDataType !== ChartDataType.TotalIncome.type &&
-            query.value.chartDataType !== ChartDataType.TotalBalance.type;
+            query.value.chartDataType !== ChartDataType.NetCashFlow.type &&
+            query.value.chartDataType !== ChartDataType.NetIncome.type;
+    });
+
+    const showStackedInTrendsChart = computed<boolean>(() => {
+        return (query.value.trendChartType === TrendChartType.Area.type || query.value.trendChartType === TrendChartType.Column.type) &&
+            query.value.chartDataType !== ChartDataType.OutflowsByAccount.type &&
+            query.value.chartDataType !== ChartDataType.InflowsByAccount.type;
     });
 
     const translateNameInTrendsChart = computed<boolean>(() => {
-        return query.value.chartDataType === ChartDataType.TotalExpense.type ||
+        return query.value.chartDataType === ChartDataType.TotalOutflows.type ||
+            query.value.chartDataType === ChartDataType.TotalExpense.type ||
+            query.value.chartDataType === ChartDataType.TotalInflows.type ||
             query.value.chartDataType === ChartDataType.TotalIncome.type ||
-            query.value.chartDataType === ChartDataType.TotalBalance.type;
+            query.value.chartDataType === ChartDataType.NetCashFlow.type ||
+            query.value.chartDataType === ChartDataType.NetIncome.type;
     });
 
+    const categoricalOverviewAnalysisData = computed<TransactionCategoricalOverviewAnalysisData | null>(() => statisticsStore.categoricalOverviewAnalysisData);
     const categoricalAnalysisData = computed<TransactionCategoricalAnalysisData>(() => statisticsStore.categoricalAnalysisData);
     const trendsAnalysisData = computed<TransactionTrendsAnalysisData | null>(() => statisticsStore.trendsAnalysisData);
 
@@ -259,10 +314,16 @@ export function useStatisticsTransactionPageBase() {
         queryTrendDateAggregationTypeName,
         isQueryDateRangeChanged,
         canShiftDateRange,
+        canUseCategoryFilter,
+        canUseTagFilter,
+        canUseKeywordFilter,
         showAmountInChart,
         totalAmountName,
+        showPercentInCategoricalChart,
         showTotalAmountInTrendsChart,
+        showStackedInTrendsChart,
         translateNameInTrendsChart,
+        categoricalOverviewAnalysisData,
         categoricalAnalysisData,
         trendsAnalysisData,
         // functions

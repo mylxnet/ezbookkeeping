@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	ebkWorkDirEnvName     = "EBK_WORK_DIR"
-	ebkEnvNamePrefix      = "EBK"
-	defaultConfigPath     = "/conf/ezbookkeeping.ini"
-	defaultStaticRootPath = "public"
+	ebkWorkDirEnvName                  = "EBK_WORK_DIR"
+	ebkConfigItemValueEnvNamePrefix    = "EBK"
+	ebkConfigItemFilePathEnvNamePrefix = "EBKCFP"
+	defaultConfigPath                  = "/conf/ezbookkeeping.ini"
+	defaultStaticRootPath              = "public"
 )
 
 // SystemMode represents running mode of system
@@ -82,6 +83,20 @@ const (
 // Duplicate checker types
 const (
 	InMemoryDuplicateCheckerType string = "in_memory"
+)
+
+// OAuth 2.0 user identifier types
+const (
+	OAuth2UserIdentifierEmail    string = "email"
+	OAuth2UserIdentifierUsername string = "username"
+)
+
+// OAuth 2.0 provider types
+const (
+	OAuth2ProviderOIDC      string = "oidc"
+	OAuth2ProviderNextcloud string = "nextcloud"
+	OAuth2ProviderGitea     string = "gitea"
+	OAuth2ProviderGithub    string = "github"
 )
 
 // Map provider types
@@ -163,6 +178,9 @@ const (
 	defaultMaxFailuresPerIpPerMinute     uint32 = 5
 	defaultMaxFailuresPerUserPerMinute   uint32 = 5
 
+	defaultOAuth2StateExpiredTime uint32 = 300   // 5 minutes
+	defaultOAuth2RequestTimeout   uint32 = 10000 // 10 seconds
+
 	defaultTransactionPictureFileMaxSize uint32 = 10485760 // 10MB
 	defaultUserAvatarFileMaxSize         uint32 = 1048576  // 1MB
 
@@ -239,15 +257,8 @@ type LLMConfig struct {
 	LargeLanguageModelAPISkipTLSVerify  bool
 }
 
-// TipConfig represents a tip setting config
-type TipConfig struct {
-	Enabled              bool
-	DefaultContent       string
-	MultiLanguageContent map[string]string
-}
-
-// NotificationConfig represents a notification setting config
-type NotificationConfig struct {
+// MultiLanguageContentConfig represents a multi-language content setting config
+type MultiLanguageContentConfig struct {
 	Enabled              bool
 	DefaultContent       string
 	MultiLanguageContent map[string]string
@@ -350,9 +361,27 @@ type Config struct {
 	MaxFailuresPerUserPerMinute           uint32
 
 	// Auth
-	EnableTwoFactor                  bool
-	EnableUserForgetPassword         bool
-	ForgetPasswordRequireVerifyEmail bool
+	EnableInternalAuth                bool
+	EnableOAuth2Login                 bool
+	EnableTwoFactor                   bool
+	EnableUserForgetPassword          bool
+	ForgetPasswordRequireVerifyEmail  bool
+	OAuth2ClientID                    string
+	OAuth2ClientSecret                string
+	OAuth2UsePKCE                     bool
+	OAuth2UserIdentifier              string
+	OAuth2AutoRegister                bool
+	OAuth2Provider                    string
+	OAuth2StateExpiredTime            uint32
+	OAuth2StateExpiredTimeDuration    time.Duration
+	OAuth2RequestTimeout              uint32
+	OAuth2Proxy                       string
+	OAuth2SkipTLSVerify               bool
+	OAuth2OIDCProviderIssuerURL       string
+	OAuth2OIDCProviderCheckIssuerURL  bool
+	OAuth2OIDCCustomDisplayNameConfig MultiLanguageContentConfig
+	OAuth2NextcloudBaseUrl            string
+	OAuth2GiteaBaseUrl                string
 
 	// User
 	EnableUserRegister            bool
@@ -371,12 +400,12 @@ type Config struct {
 	MaxImportFileSize uint32
 
 	// Tip
-	LoginPageTips TipConfig
+	LoginPageTips MultiLanguageContentConfig
 
 	// Notification
-	AfterRegisterNotification NotificationConfig
-	AfterLoginNotification    NotificationConfig
-	AfterOpenNotification     NotificationConfig
+	AfterRegisterNotification MultiLanguageContentConfig
+	AfterLoginNotification    MultiLanguageContentConfig
+	AfterOpenNotification     MultiLanguageContentConfig
 
 	// Map
 	MapProvider                           string
@@ -955,9 +984,60 @@ func loadSecurityConfiguration(config *Config, configFile *ini.File, sectionName
 }
 
 func loadAuthConfiguration(config *Config, configFile *ini.File, sectionName string) error {
+	config.EnableInternalAuth = getConfigItemBoolValue(configFile, sectionName, "enable_internal_auth", true)
+	config.EnableOAuth2Login = getConfigItemBoolValue(configFile, sectionName, "enable_oauth2_auth", false)
 	config.EnableTwoFactor = getConfigItemBoolValue(configFile, sectionName, "enable_two_factor", true)
 	config.EnableUserForgetPassword = getConfigItemBoolValue(configFile, sectionName, "enable_forget_password", false)
 	config.ForgetPasswordRequireVerifyEmail = getConfigItemBoolValue(configFile, sectionName, "forget_password_require_email_verify", false)
+	config.OAuth2ClientID = getConfigItemStringValue(configFile, sectionName, "oauth2_client_id")
+	config.OAuth2ClientSecret = getConfigItemStringValue(configFile, sectionName, "oauth2_client_secret")
+	config.OAuth2UsePKCE = getConfigItemBoolValue(configFile, sectionName, "oauth2_use_pkce", false)
+
+	oauth2UserIdentifier := getConfigItemStringValue(configFile, sectionName, "oauth2_user_identifier")
+
+	if oauth2UserIdentifier == OAuth2UserIdentifierEmail {
+		config.OAuth2UserIdentifier = OAuth2UserIdentifierEmail
+	} else if oauth2UserIdentifier == OAuth2UserIdentifierUsername {
+		config.OAuth2UserIdentifier = OAuth2UserIdentifierUsername
+	} else {
+		return errs.ErrInvalidOAuth2UserIdentifier
+	}
+
+	config.OAuth2AutoRegister = getConfigItemBoolValue(configFile, sectionName, "oauth2_auto_register", true)
+
+	oauth2Provider := getConfigItemStringValue(configFile, sectionName, "oauth2_provider")
+
+	if oauth2Provider == "" {
+		config.OAuth2Provider = ""
+	} else if oauth2Provider == OAuth2ProviderOIDC {
+		config.OAuth2Provider = OAuth2ProviderOIDC
+	} else if oauth2Provider == OAuth2ProviderNextcloud {
+		config.OAuth2Provider = OAuth2ProviderNextcloud
+	} else if oauth2Provider == OAuth2ProviderGitea {
+		config.OAuth2Provider = OAuth2ProviderGitea
+	} else if oauth2Provider == OAuth2ProviderGithub {
+		config.OAuth2Provider = OAuth2ProviderGithub
+	} else {
+		return errs.ErrInvalidOAuth2Provider
+	}
+
+	config.OAuth2StateExpiredTime = getConfigItemUint32Value(configFile, sectionName, "oauth2_state_expired_time", defaultOAuth2StateExpiredTime)
+
+	if config.OAuth2StateExpiredTime < 60 {
+		return errs.ErrInvalidOAuth2StateExpiredTime
+	}
+
+	config.OAuth2StateExpiredTimeDuration = time.Duration(config.OAuth2StateExpiredTime) * time.Second
+
+	config.OAuth2Proxy = getConfigItemStringValue(configFile, sectionName, "oauth2_proxy", "system")
+	config.OAuth2RequestTimeout = getConfigItemUint32Value(configFile, sectionName, "oauth2_request_timeout", defaultOAuth2RequestTimeout)
+	config.OAuth2SkipTLSVerify = getConfigItemBoolValue(configFile, sectionName, "oauth2_skip_tls_verify", false)
+
+	config.OAuth2OIDCProviderIssuerURL = getConfigItemStringValue(configFile, sectionName, "oidc_provider_base_url")
+	config.OAuth2OIDCProviderCheckIssuerURL = getConfigItemBoolValue(configFile, sectionName, "oidc_provider_check_issuer_url", true)
+	config.OAuth2OIDCCustomDisplayNameConfig = getMultiLanguageContentConfig(configFile, sectionName, "enable_oidc_display_name", "oidc_custom_display_name")
+	config.OAuth2NextcloudBaseUrl = getConfigItemStringValue(configFile, sectionName, "nextcloud_base_url")
+	config.OAuth2GiteaBaseUrl = getConfigItemStringValue(configFile, sectionName, "gitea_base_url")
 
 	return nil
 }
@@ -995,15 +1075,15 @@ func loadDataConfiguration(config *Config, configFile *ini.File, sectionName str
 }
 
 func loadTipConfiguration(config *Config, configFile *ini.File, sectionName string) error {
-	config.LoginPageTips = getTipConfiguration(configFile, sectionName, "enable_tips_in_login_page", "login_page_tips_content")
+	config.LoginPageTips = getMultiLanguageContentConfig(configFile, sectionName, "enable_tips_in_login_page", "login_page_tips_content")
 
 	return nil
 }
 
 func loadNotificationConfiguration(config *Config, configFile *ini.File, sectionName string) error {
-	config.AfterRegisterNotification = getNotificationConfiguration(configFile, sectionName, "enable_notification_after_register", "after_register_notification_content")
-	config.AfterLoginNotification = getNotificationConfiguration(configFile, sectionName, "enable_notification_after_login", "after_login_notification_content")
-	config.AfterOpenNotification = getNotificationConfiguration(configFile, sectionName, "enable_notification_after_open", "after_open_notification_content")
+	config.AfterRegisterNotification = getMultiLanguageContentConfig(configFile, sectionName, "enable_notification_after_register", "after_register_notification_content")
+	config.AfterLoginNotification = getMultiLanguageContentConfig(configFile, sectionName, "enable_notification_after_login", "after_login_notification_content")
+	config.AfterOpenNotification = getMultiLanguageContentConfig(configFile, sectionName, "enable_notification_after_open", "after_open_notification_content")
 
 	return nil
 }
@@ -1140,29 +1220,8 @@ func getFinalPath(workingPath, p string) (string, error) {
 	return p, err
 }
 
-func getTipConfiguration(configFile *ini.File, sectionName string, enableKey string, contentKey string) TipConfig {
-	config := TipConfig{
-		Enabled:              getConfigItemBoolValue(configFile, sectionName, enableKey, false),
-		DefaultContent:       getConfigItemStringValue(configFile, sectionName, contentKey, ""),
-		MultiLanguageContent: make(map[string]string),
-	}
-
-	for languageTag := range locales.AllLanguages {
-		multiLanguageContentKey := strings.ToLower(languageTag)
-		multiLanguageContentKey = strings.Replace(multiLanguageContentKey, "-", "_", -1)
-		multiLanguageContentKey = contentKey + "_" + multiLanguageContentKey
-		content := getConfigItemStringValue(configFile, sectionName, multiLanguageContentKey, "")
-
-		if content != "" {
-			config.MultiLanguageContent[languageTag] = content
-		}
-	}
-
-	return config
-}
-
-func getNotificationConfiguration(configFile *ini.File, sectionName string, enableKey string, contentKey string) NotificationConfig {
-	config := NotificationConfig{
+func getMultiLanguageContentConfig(configFile *ini.File, sectionName string, enableKey string, contentKey string) MultiLanguageContentConfig {
+	config := MultiLanguageContentConfig{
 		Enabled:              getConfigItemBoolValue(configFile, sectionName, enableKey, false),
 		DefaultContent:       getConfigItemStringValue(configFile, sectionName, contentKey, ""),
 		MultiLanguageContent: make(map[string]string),
@@ -1183,8 +1242,7 @@ func getNotificationConfiguration(configFile *ini.File, sectionName string, enab
 }
 
 func getConfigItemIsSet(configFile *ini.File, sectionName string, itemName string) bool {
-	environmentKey := getEnvironmentKey(sectionName, itemName)
-	environmentValue := os.Getenv(environmentKey)
+	environmentValue := getConfigItemValueFromEnvironment(sectionName, itemName)
 
 	if len(environmentValue) > 0 {
 		return true
@@ -1200,8 +1258,7 @@ func getConfigItemIsSet(configFile *ini.File, sectionName string, itemName strin
 }
 
 func getConfigItemStringValue(configFile *ini.File, sectionName string, itemName string, defaultValue ...string) string {
-	environmentKey := getEnvironmentKey(sectionName, itemName)
-	environmentValue := os.Getenv(environmentKey)
+	environmentValue := getConfigItemValueFromEnvironment(sectionName, itemName)
 
 	if len(environmentValue) > 0 {
 		return environmentValue
@@ -1217,8 +1274,7 @@ func getConfigItemStringValue(configFile *ini.File, sectionName string, itemName
 }
 
 func getConfigItemUint8Value(configFile *ini.File, sectionName string, itemName string, defaultValue uint8) uint8 {
-	environmentKey := getEnvironmentKey(sectionName, itemName)
-	environmentValue := os.Getenv(environmentKey)
+	environmentValue := getConfigItemValueFromEnvironment(sectionName, itemName)
 
 	if len(environmentValue) > 0 {
 		value, err := strconv.ParseUint(environmentValue, 10, 8)
@@ -1239,8 +1295,7 @@ func getConfigItemUint8Value(configFile *ini.File, sectionName string, itemName 
 }
 
 func getConfigItemUint16Value(configFile *ini.File, sectionName string, itemName string, defaultValue uint16) uint16 {
-	environmentKey := getEnvironmentKey(sectionName, itemName)
-	environmentValue := os.Getenv(environmentKey)
+	environmentValue := getConfigItemValueFromEnvironment(sectionName, itemName)
 
 	if len(environmentValue) > 0 {
 		value, err := strconv.ParseUint(environmentValue, 10, 16)
@@ -1261,8 +1316,7 @@ func getConfigItemUint16Value(configFile *ini.File, sectionName string, itemName
 }
 
 func getConfigItemUint32Value(configFile *ini.File, sectionName string, itemName string, defaultValue uint32) uint32 {
-	environmentKey := getEnvironmentKey(sectionName, itemName)
-	environmentValue := os.Getenv(environmentKey)
+	environmentValue := getConfigItemValueFromEnvironment(sectionName, itemName)
 
 	if len(environmentValue) > 0 {
 		value, err := strconv.ParseUint(environmentValue, 10, 32)
@@ -1283,8 +1337,7 @@ func getConfigItemUint32Value(configFile *ini.File, sectionName string, itemName
 }
 
 func getConfigItemBoolValue(configFile *ini.File, sectionName string, itemName string, defaultValue bool) bool {
-	environmentKey := getEnvironmentKey(sectionName, itemName)
-	environmentValue := os.Getenv(environmentKey)
+	environmentValue := getConfigItemValueFromEnvironment(sectionName, itemName)
 
 	if len(environmentValue) > 0 {
 		value, err := strconv.ParseBool(environmentValue)
@@ -1298,8 +1351,30 @@ func getConfigItemBoolValue(configFile *ini.File, sectionName string, itemName s
 	return section.Key(itemName).MustBool(defaultValue)
 }
 
-func getEnvironmentKey(sectionName string, itemName string) string {
-	return fmt.Sprintf("%s_%s_%s", ebkEnvNamePrefix, strings.ToUpper(sectionName), strings.ToUpper(itemName))
+func getConfigItemValueFromEnvironment(sectionName string, itemName string) string {
+	itemFilePathEnvironmentKey := getConfigItemFilePathEnvironmentKey(sectionName, itemName)
+	itemFilePath := os.Getenv(itemFilePathEnvironmentKey)
+
+	if itemFilePath != "" {
+		content, err := os.ReadFile(itemFilePath)
+
+		if err == nil {
+			return string(content)
+		}
+	}
+
+	itemValueEnvironmentKey := getConfigItemValueEnvironmentKey(sectionName, itemName)
+	itemValueEnvironmentValue := os.Getenv(itemValueEnvironmentKey)
+
+	return itemValueEnvironmentValue
+}
+
+func getConfigItemFilePathEnvironmentKey(sectionName string, itemName string) string {
+	return fmt.Sprintf("%s_%s_%s", ebkConfigItemFilePathEnvNamePrefix, strings.ToUpper(sectionName), strings.ToUpper(itemName))
+}
+
+func getConfigItemValueEnvironmentKey(sectionName string, itemName string) string {
+	return fmt.Sprintf("%s_%s_%s", ebkConfigItemValueEnvNamePrefix, strings.ToUpper(sectionName), strings.ToUpper(itemName))
 }
 
 func getLogLevel(logLevelStr string) (Level, error) {

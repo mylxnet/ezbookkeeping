@@ -15,6 +15,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/mayswind/ezbookkeeping/pkg/api"
+	"github.com/mayswind/ezbookkeeping/pkg/auth/oauth2"
 	"github.com/mayswind/ezbookkeeping/pkg/core"
 	"github.com/mayswind/ezbookkeeping/pkg/cron"
 	"github.com/mayswind/ezbookkeeping/pkg/errs"
@@ -72,6 +73,13 @@ func startWebServer(c *core.CliContext) error {
 		return err
 	}
 
+	err = oauth2.InitializeOAuth2Provider(config)
+
+	if err != nil {
+		log.BootErrorf(c, "[webserver.startWebServer] initializes oauth 2.0 provider failed, because %s", err.Error())
+		return err
+	}
+
 	err = cron.InitializeCronJobSchedulerContainer(c, config, true)
 
 	if err != nil {
@@ -104,6 +112,7 @@ func startWebServer(c *core.CliContext) error {
 		_ = v.RegisterValidation("notBlank", validators.NotBlank)
 		_ = v.RegisterValidation("validUsername", validators.ValidUsername)
 		_ = v.RegisterValidation("validEmail", validators.ValidEmail)
+		_ = v.RegisterValidation("validNickname", validators.ValidNickname)
 		_ = v.RegisterValidation("validCurrency", validators.ValidCurrency)
 		_ = v.RegisterValidation("validHexRGBColor", validators.ValidHexRGBColor)
 		_ = v.RegisterValidation("validAmountFilter", validators.ValidAmountFilter)
@@ -242,14 +251,26 @@ func startWebServer(c *core.CliContext) error {
 		}
 	}
 
+	if config.EnableOAuth2Login {
+		oauth2Route := router.Group("/oauth2")
+		oauth2Route.Use(bindMiddleware(middlewares.RequestId(config)))
+		oauth2Route.Use(bindMiddleware(middlewares.RequestLog))
+		{
+			oauth2Route.GET("/login", bindRedirect(api.OAuth2Authentications.LoginHandler))
+			oauth2Route.GET("/callback", bindRedirect(api.OAuth2Authentications.CallbackHandler))
+		}
+	}
+
 	apiRoute := router.Group("/api")
 
 	apiRoute.Use(bindMiddleware(middlewares.RequestId(config)))
 	apiRoute.Use(bindMiddleware(middlewares.RequestLog))
 	{
-		apiRoute.POST("/authorize.json", bindApiWithTokenUpdate(api.Authorizations.AuthorizeHandler, config))
+		if config.EnableInternalAuth {
+			apiRoute.POST("/authorize.json", bindApiWithTokenUpdate(api.Authorizations.AuthorizeHandler, config))
+		}
 
-		if config.EnableTwoFactor {
+		if config.EnableInternalAuth && config.EnableTwoFactor {
 			twoFactorRoute := apiRoute.Group("/2fa")
 			twoFactorRoute.Use(bindMiddleware(middlewares.JWTTwoFactorAuthorization))
 			{
@@ -258,7 +279,15 @@ func startWebServer(c *core.CliContext) error {
 			}
 		}
 
-		if config.EnableUserRegister {
+		if config.EnableOAuth2Login {
+			oauth2Route := apiRoute.Group("/oauth2")
+			oauth2Route.Use(bindMiddleware(middlewares.JWTOAuth2CallbackAuthorization))
+			{
+				oauth2Route.POST("/authorize.json", bindApiWithTokenUpdate(api.Authorizations.OAuth2CallbackAuthorizeHandler, config))
+			}
+		}
+
+		if config.EnableInternalAuth && config.EnableUserRegister {
 			apiRoute.POST("/register.json", bindApiWithTokenUpdate(api.Users.UserRegisterHandler, config))
 		}
 
@@ -272,7 +301,7 @@ func startWebServer(c *core.CliContext) error {
 			}
 		}
 
-		if config.EnableUserForgetPassword {
+		if config.EnableInternalAuth && config.EnableUserForgetPassword {
 			apiRoute.POST("/forget_password/request.json", bindApi(api.ForgetPasswords.UserForgetPasswordRequestHandler))
 
 			resetPasswordRoute := apiRoute.Group("/forget_password/reset")
@@ -305,6 +334,12 @@ func startWebServer(c *core.CliContext) error {
 
 			if config.EnableUserVerifyEmail {
 				apiV1Route.POST("/users/verify_email/resend.json", bindApi(api.Users.UserSendVerifyEmailByLoginedUserHandler))
+			}
+
+			// External Authentications
+			if config.EnableOAuth2Login {
+				apiV1Route.GET("/users/external_auth/list.json", bindApi(api.UserExternalAuths.ExternalAuthListHanlder))
+				apiV1Route.POST("/users/external_auth/unlink.json", bindApi(api.UserExternalAuths.UnlinkExternalAuthHandler))
 			}
 
 			// Application Cloud Settings
@@ -353,6 +388,7 @@ func startWebServer(c *core.CliContext) error {
 			apiV1Route.GET("/transactions/get.json", bindApi(api.Transactions.TransactionGetHandler))
 			apiV1Route.POST("/transactions/add.json", bindApi(api.Transactions.TransactionCreateHandler))
 			apiV1Route.POST("/transactions/modify.json", bindApi(api.Transactions.TransactionModifyHandler))
+			apiV1Route.POST("/transactions/move/all.json", bindApi(api.Transactions.TransactionMoveAllBetweenAccountsHandler))
 			apiV1Route.POST("/transactions/delete.json", bindApi(api.Transactions.TransactionDeleteHandler))
 
 			if config.EnableDataImport {
@@ -440,6 +476,19 @@ func startWebServer(c *core.CliContext) error {
 func bindMiddleware(fn core.MiddlewareHandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		fn(core.WrapWebContext(c))
+	}
+}
+
+func bindRedirect(fn core.RedirectHandlerFunc) gin.HandlerFunc {
+	return func(ginCtx *gin.Context) {
+		c := core.WrapWebContext(ginCtx)
+		url, err := fn(c)
+
+		if err != nil {
+			utils.PrintJsonErrorResult(c, err)
+		} else {
+			c.Redirect(http.StatusFound, url)
+		}
 	}
 }
 

@@ -11,7 +11,10 @@ import { entries, values } from '@/core/base.ts';
 import { type TextualYearMonth, type TimeRangeAndDateType, DateRangeScene, DateRange } from '@/core/datetime.ts';
 import { TimezoneTypeForStatistics } from '@/core/timezone.ts';
 import { CategoryType } from '@/core/category.ts';
-import { TransactionTagFilterType } from '@/core/transaction.ts';
+import {
+    TransactionRelatedAccountType,
+    TransactionTagFilterType
+} from '@/core/transaction.ts';
 import {
     StatisticsAnalysisType,
     CategoricalChartType,
@@ -25,19 +28,23 @@ import {
 import { DEFAULT_ACCOUNT_ICON, DEFAULT_CATEGORY_ICON } from '@/consts/icon.ts';
 import { DEFAULT_ACCOUNT_COLOR, DEFAULT_CATEGORY_COLOR } from '@/consts/color.ts';
 
-import type { Account } from '@/models/account.ts';
-import type { TransactionCategory } from '@/models/transaction_category.ts';
-import type {
-    TransactionStatisticResponse,
-    TransactionStatisticResponseItem,
-    TransactionStatisticTrendsResponseItem,
-    TransactionStatisticDataItemType,
-    TransactionStatisticDataItemBase,
-    TransactionCategoricalAnalysisData,
-    TransactionCategoricalAnalysisDataItem,
-    TransactionTrendsAnalysisData,
-    TransactionTrendsAnalysisDataItem,
-    TransactionTrendsAnalysisDataAmount
+import {
+    type TransactionStatisticResponse,
+    type TransactionStatisticResponseItem,
+    type TransactionStatisticTrendsResponseItem,
+    type TransactionStatisticResponseItemWithInfo,
+    type TransactionStatisticResponseWithInfo,
+    type TransactionStatisticTrendsResponseItemWithInfo,
+    type TransactionStatisticDataItemType,
+    type TransactionStatisticDataItemBase,
+    type TransactionCategoricalOverviewAnalysisData,
+    type TransactionCategoricalOverviewAnalysisDataItem,
+    type TransactionCategoricalAnalysisData,
+    type TransactionCategoricalAnalysisDataItem,
+    type TransactionTrendsAnalysisData,
+    type TransactionTrendsAnalysisDataItem,
+    type TransactionTrendsAnalysisDataAmount,
+    TransactionCategoricalOverviewAnalysisDataItemType
 } from '@/models/transaction.ts';
 
 import {
@@ -57,29 +64,6 @@ import { getFinalCategoryIdsByFilteredCategoryIds } from '@/lib/category.ts';
 import { sortStatisticsItems } from '@/lib/statistics.ts';
 import logger from '@/lib/logger.ts';
 import services from '@/lib/services.ts';
-
-interface TransactionStatisticResponseItemWithInfo extends TransactionStatisticResponseItem {
-    categoryId: string;
-    accountId: string;
-    amount: number;
-    account?: Account;
-    primaryAccount?: Account;
-    category?: TransactionCategory;
-    primaryCategory?: TransactionCategory;
-    amountInDefaultCurrency: number | null;
-}
-
-interface TransactionStatisticResponseWithInfo {
-    readonly startTime: number;
-    readonly endTime: number;
-    readonly items: TransactionStatisticResponseItemWithInfo[];
-}
-
-interface TransactionStatisticTrendsResponseItemWithInfo {
-    readonly year: number;
-    readonly month: number; // 1-based (1 = January, 12 = December)
-    readonly items: TransactionStatisticResponseItemWithInfo[];
-}
 
 interface WritableTransactionCategoricalAnalysisData {
     totalAmount: number;
@@ -177,7 +161,9 @@ export const useStatisticsStore = defineStore('statistics', () => {
     const transactionStatisticsStateInvalid = ref<boolean>(true);
 
     const categoricalAnalysisChartDataCategory = computed<string>(() => {
-        if (transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseByAccount.type ||
+        if (transactionStatisticsFilter.value.chartDataType === ChartDataType.OutflowsByAccount.type ||
+            transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseByAccount.type ||
+            transactionStatisticsFilter.value.chartDataType === ChartDataType.InflowsByAccount.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.IncomeByAccount.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.AccountTotalAssets.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.AccountTotalLiabilities.type) {
@@ -218,6 +204,280 @@ export const useStatisticsStore = defineStore('statistics', () => {
         }
 
         return getCategoryTotalAmountItems(transactionCategoryStatisticsDataWithCategoryAndAccountInfo.value.items, transactionStatisticsFilter.value);
+    });
+
+    const categoricalOverviewAnalysisData = computed<TransactionCategoricalOverviewAnalysisData | null>(() => {
+        if (!transactionCategoryStatisticsDataWithCategoryAndAccountInfo.value || !transactionCategoryStatisticsDataWithCategoryAndAccountInfo.value.items) {
+            return null;
+        }
+
+        const allDataItemsMap: Record<string, TransactionCategoricalOverviewAnalysisDataItem> = {};
+        const allIncomeByPrimaryCategoryDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allIncomeBySecondaryCategoryDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allIncomeByAccountDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allExpenseByAccountDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allExpenseBySecondaryCategoryDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allExpenseByPrimaryCategoryDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allOpeningBalanceDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+        const allNetCashFlowDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [];
+
+        let totalIncome: number = 0;
+        let totalExpense: number = 0;
+
+        for (const item of transactionCategoryStatisticsDataWithCategoryAndAccountInfo.value.items) {
+            if (!item.primaryAccount || !item.account || !item.primaryCategory || !item.category) {
+                continue;
+            }
+
+            if (item.relatedAccount && item.relatedAccountType === TransactionRelatedAccountType.TransferFrom) {
+                continue;
+            }
+
+            if (!isNumber(item.amountInDefaultCurrency)) {
+                continue;
+            }
+
+            if (transactionStatisticsFilter.value.filterAccountIds && transactionStatisticsFilter.value.filterAccountIds[item.account.id]) {
+                continue;
+            }
+
+            if (transactionStatisticsFilter.value.filterCategoryIds && transactionStatisticsFilter.value.filterCategoryIds[item.category.id]) {
+                continue;
+            }
+
+            if (item.category.type === CategoryType.Income) {
+                totalIncome += item.amountInDefaultCurrency;
+            } else if (item.category.type === CategoryType.Expense) {
+                totalExpense += item.amountInDefaultCurrency;
+            }
+
+            const incomeByAccountKey = `${TransactionCategoricalOverviewAnalysisDataItemType.IncomeByAccount}:${item.account.id}`;
+            const expenseByAccountKey = `${TransactionCategoricalOverviewAnalysisDataItemType.ExpenseByAccount}:${item.account.id}`;
+            let incomeByAccountItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[incomeByAccountKey];
+            let expenseByAccountItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[expenseByAccountKey];
+
+            if (!incomeByAccountItem) {
+                incomeByAccountItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                    item.account.id,
+                    item.account.name,
+                    TransactionCategoricalOverviewAnalysisDataItemType.IncomeByAccount,
+                    [item.primaryAccount.category, item.primaryAccount.displayOrder, item.account.displayOrder],
+                    item.primaryAccount.hidden || item.account.hidden);
+                allDataItemsMap[incomeByAccountKey] = incomeByAccountItem;
+                allIncomeByAccountDataItems.push(incomeByAccountItem);
+            }
+
+            if (!expenseByAccountItem) {
+                expenseByAccountItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                    item.account.id,
+                    item.account.name,
+                    TransactionCategoricalOverviewAnalysisDataItemType.ExpenseByAccount,
+                    [item.primaryAccount.category, item.primaryAccount.displayOrder, item.account.displayOrder],
+                    item.primaryAccount.hidden || item.account.hidden);
+                allDataItemsMap[expenseByAccountKey] = expenseByAccountItem;
+                allExpenseByAccountDataItems.push(expenseByAccountItem);
+            }
+
+            if (item.category.type === CategoryType.Income) {
+                const primaryCategoryItemKey = `${TransactionCategoricalOverviewAnalysisDataItemType.IncomeByPrimaryCategory}:${item.primaryCategory.id}`;
+                const secondaryCategoryItemKey = `${TransactionCategoricalOverviewAnalysisDataItemType.IncomeBySecondaryCategory}:${item.category.id}`;
+
+                let primaryCategoryDataItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[primaryCategoryItemKey];
+                let secondaryCategoryDataItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[secondaryCategoryItemKey];
+
+                if (!primaryCategoryDataItem) {
+                    primaryCategoryDataItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                        item.primaryCategory.id,
+                        item.primaryCategory.name,
+                        TransactionCategoricalOverviewAnalysisDataItemType.IncomeByPrimaryCategory,
+                        [item.primaryCategory.displayOrder],
+                        item.primaryCategory.hidden);
+                    allDataItemsMap[primaryCategoryItemKey] = primaryCategoryDataItem;
+                    allIncomeByPrimaryCategoryDataItems.push(primaryCategoryDataItem);
+                }
+
+                if (!secondaryCategoryDataItem) {
+                    secondaryCategoryDataItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                        item.category.id,
+                        item.category.name,
+                        TransactionCategoricalOverviewAnalysisDataItemType.IncomeBySecondaryCategory,
+                        [item.primaryCategory.displayOrder, item.category.displayOrder],
+                        item.primaryCategory.hidden || item.category.hidden);
+                    allDataItemsMap[secondaryCategoryItemKey] = secondaryCategoryDataItem;
+                    allIncomeBySecondaryCategoryDataItems.push(secondaryCategoryDataItem);
+                }
+
+                primaryCategoryDataItem.totalAmount += item.amountInDefaultCurrency;
+                primaryCategoryDataItem.totalNonNegativeAmount += item.amountInDefaultCurrency > 0 ? item.amountInDefaultCurrency : 0;
+                primaryCategoryDataItem.includeInPercent = true;
+                primaryCategoryDataItem.outflows.push({ amount: item.amountInDefaultCurrency, relatedItem: secondaryCategoryDataItem });
+
+                secondaryCategoryDataItem.totalAmount += item.amountInDefaultCurrency;
+                secondaryCategoryDataItem.totalNonNegativeAmount += item.amountInDefaultCurrency > 0 ? item.amountInDefaultCurrency : 0;
+                secondaryCategoryDataItem.includeInPercent = true;
+                secondaryCategoryDataItem.inflows.push({ amount: item.amountInDefaultCurrency, relatedItem: primaryCategoryDataItem });
+                secondaryCategoryDataItem.outflows.push({ amount: item.amountInDefaultCurrency, relatedItem: incomeByAccountItem });
+
+                incomeByAccountItem.totalAmount += item.amountInDefaultCurrency;
+                incomeByAccountItem.totalNonNegativeAmount += item.amountInDefaultCurrency > 0 ? item.amountInDefaultCurrency : 0;
+                incomeByAccountItem.includeInPercent = true;
+                incomeByAccountItem.inflows.push({ amount: item.amountInDefaultCurrency, relatedItem: secondaryCategoryDataItem });
+            } else if (item.category.type === CategoryType.Expense) {
+                const primaryCategoryItemKey = `${TransactionCategoricalOverviewAnalysisDataItemType.ExpenseByPrimaryCategory}:${item.primaryCategory.id}`;
+                const secondaryCategoryItemKey = `${TransactionCategoricalOverviewAnalysisDataItemType.ExpenseBySecondaryCategory}:${item.category.id}`;
+
+                let primaryCategoryDataItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[primaryCategoryItemKey];
+                let secondaryCategoryDataItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[secondaryCategoryItemKey];
+
+                if (!primaryCategoryDataItem) {
+                    primaryCategoryDataItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                        item.primaryCategory.id,
+                        item.primaryCategory.name,
+                        TransactionCategoricalOverviewAnalysisDataItemType.ExpenseByPrimaryCategory,
+                        [item.primaryCategory.displayOrder],
+                        item.primaryCategory.hidden);
+                    allDataItemsMap[primaryCategoryItemKey] = primaryCategoryDataItem;
+                    allExpenseByPrimaryCategoryDataItems.push(primaryCategoryDataItem);
+                }
+
+                if (!secondaryCategoryDataItem) {
+                    secondaryCategoryDataItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                        item.category.id,
+                        item.category.name,
+                        TransactionCategoricalOverviewAnalysisDataItemType.ExpenseBySecondaryCategory,
+                        [item.primaryCategory.displayOrder, item.category.displayOrder],
+                        item.primaryCategory.hidden || item.category.hidden);
+                    allDataItemsMap[secondaryCategoryItemKey] = secondaryCategoryDataItem;
+                    allExpenseBySecondaryCategoryDataItems.push(secondaryCategoryDataItem);
+                }
+
+                expenseByAccountItem.totalAmount += item.amountInDefaultCurrency;
+                expenseByAccountItem.totalNonNegativeAmount += item.amountInDefaultCurrency > 0 ? item.amountInDefaultCurrency : 0;
+                expenseByAccountItem.includeInPercent = true;
+                expenseByAccountItem.outflows.push({ amount: item.amountInDefaultCurrency, relatedItem: secondaryCategoryDataItem });
+
+                secondaryCategoryDataItem.totalAmount += item.amountInDefaultCurrency;
+                secondaryCategoryDataItem.totalNonNegativeAmount += item.amountInDefaultCurrency > 0 ? item.amountInDefaultCurrency : 0
+                secondaryCategoryDataItem.includeInPercent = true;
+                secondaryCategoryDataItem.inflows.push({ amount: item.amountInDefaultCurrency, relatedItem: expenseByAccountItem });
+                secondaryCategoryDataItem.outflows.push({ amount: item.amountInDefaultCurrency, relatedItem: primaryCategoryDataItem });
+
+                primaryCategoryDataItem.totalAmount += item.amountInDefaultCurrency;
+                primaryCategoryDataItem.totalNonNegativeAmount += item.amountInDefaultCurrency > 0 ? item.amountInDefaultCurrency : 0;
+                primaryCategoryDataItem.includeInPercent = true;
+                primaryCategoryDataItem.inflows.push({ amount: item.amountInDefaultCurrency, relatedItem: secondaryCategoryDataItem });
+            } else if (item.category.type === CategoryType.Transfer && item.relatedPrimaryAccount && item.relatedAccount) {
+                const transferToAccountKey = `${TransactionCategoricalOverviewAnalysisDataItemType.ExpenseByAccount}:${item.relatedAccount.id}`;
+                let transferToAccountItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[transferToAccountKey];
+
+                if (!transferToAccountItem) {
+                    transferToAccountItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                        item.relatedAccount.id,
+                        item.relatedAccount.name,
+                        TransactionCategoricalOverviewAnalysisDataItemType.ExpenseByAccount,
+                        [item.relatedPrimaryAccount.category, item.relatedPrimaryAccount.displayOrder, item.relatedAccount.displayOrder],
+                        item.relatedPrimaryAccount.hidden || item.relatedAccount.hidden);
+                    allDataItemsMap[transferToAccountKey] = transferToAccountItem;
+                    allExpenseByAccountDataItems.push(transferToAccountItem);
+                }
+
+                incomeByAccountItem.outflows.push({ amount: item.amountInDefaultCurrency, relatedItem: transferToAccountItem });
+                transferToAccountItem.inflows.push({ amount: item.amountInDefaultCurrency, relatedItem: incomeByAccountItem });
+            }
+        }
+
+        sortCategoricalOverviewAnalysisDataItems(allIncomeByPrimaryCategoryDataItems, transactionStatisticsFilter.value);
+        sortCategoricalOverviewAnalysisDataItems(allIncomeBySecondaryCategoryDataItems, transactionStatisticsFilter.value);
+        sortCategoricalOverviewAnalysisDataItems(allIncomeByAccountDataItems, transactionStatisticsFilter.value);
+        sortCategoricalOverviewAnalysisDataItems(allExpenseByAccountDataItems, transactionStatisticsFilter.value);
+        sortCategoricalOverviewAnalysisDataItems(allExpenseBySecondaryCategoryDataItems, transactionStatisticsFilter.value);
+        sortCategoricalOverviewAnalysisDataItems(allExpenseByPrimaryCategoryDataItems, transactionStatisticsFilter.value);
+
+        for (const item of allExpenseByAccountDataItems) {
+            const incomeByAccountKey = `${TransactionCategoricalOverviewAnalysisDataItemType.IncomeByAccount}:${item.id}`;
+            const incomeByAccountItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[incomeByAccountKey];
+
+            let accountTotalInflowsAmount: number = 0;
+            let accountTotalIncomeAmount: number = 0;
+            let accountTotalTransferAmount: number = 0;
+            let accountTotalOutflowsAmount: number = 0;
+
+            if (incomeByAccountItem) {
+                for (const inflow of incomeByAccountItem.inflows) {
+                    accountTotalInflowsAmount += inflow.amount;
+                    accountTotalIncomeAmount += inflow.amount;
+                }
+
+                for (const outflow of incomeByAccountItem.outflows) {
+                    accountTotalTransferAmount += outflow.amount;
+                }
+            }
+
+            for (const inflow of item.inflows) {
+                if (inflow.relatedItem.type === item.type && inflow.relatedItem.id === item.id) {
+                    continue;
+                }
+
+                accountTotalInflowsAmount += inflow.amount;
+            }
+
+            for (const outflow of item.outflows) {
+                accountTotalOutflowsAmount += outflow.amount;
+            }
+
+            const accountBalance: number = accountTotalIncomeAmount - accountTotalTransferAmount - accountTotalOutflowsAmount;
+            const accountNetCashFlow: number = accountTotalInflowsAmount - accountTotalTransferAmount - accountTotalOutflowsAmount;
+
+            if (incomeByAccountItem && accountsStore.allAccountsMap[item.id]?.isAsset) {
+                if (accountBalance > 0) { // has positive balance, transfer the amount from income account to expense account
+                    incomeByAccountItem.outflows.push({ amount: accountBalance + accountTotalOutflowsAmount, relatedItem: item });
+                    item.inflows.push({ amount: accountBalance + accountTotalOutflowsAmount, relatedItem: incomeByAccountItem });
+                } else if (accountNetCashFlow < 0) { // has negative net cash flow, add the difference to income account
+                    incomeByAccountItem.totalAmount += -accountNetCashFlow;
+                    incomeByAccountItem.totalNonNegativeAmount += -accountNetCashFlow > 0 ? -accountNetCashFlow : 0;
+                    incomeByAccountItem.outflows.push({ amount: -accountNetCashFlow, relatedItem: item });
+                    item.inflows.push({ amount: -accountNetCashFlow, relatedItem: incomeByAccountItem });
+                }
+            }
+
+            if (accountNetCashFlow > 0) {
+                let netCashFlowItem: TransactionCategoricalOverviewAnalysisDataItem | undefined = allDataItemsMap[TransactionCategoricalOverviewAnalysisDataItemType.NetCashFlow];
+
+                if (!netCashFlowItem) {
+                    netCashFlowItem = createNewTransactionCategoricalOverviewAnalysisDataItem(
+                        TransactionCategoricalOverviewAnalysisDataItemType.NetCashFlow,
+                        'Net Cash Flow',
+                        TransactionCategoricalOverviewAnalysisDataItemType.NetCashFlow,
+                        [Number.MAX_SAFE_INTEGER],
+                        false);
+                    allDataItemsMap[TransactionCategoricalOverviewAnalysisDataItemType.NetCashFlow] = netCashFlowItem;
+                    allNetCashFlowDataItems.push(netCashFlowItem);
+                }
+
+                item.outflows.push({ amount: accountNetCashFlow, relatedItem: netCashFlowItem });
+
+                netCashFlowItem.totalAmount += accountNetCashFlow;
+                netCashFlowItem.totalNonNegativeAmount += accountNetCashFlow > 0 ? accountNetCashFlow : 0;
+                netCashFlowItem.inflows.push({ amount: accountNetCashFlow, relatedItem: item });
+            }
+        }
+
+        const allDataItems: TransactionCategoricalOverviewAnalysisDataItem[] = [
+            ...allIncomeByPrimaryCategoryDataItems,
+            ...allIncomeBySecondaryCategoryDataItems,
+            ...allIncomeByAccountDataItems,
+            ...allOpeningBalanceDataItems,
+            ...allExpenseByAccountDataItems,
+            ...allExpenseBySecondaryCategoryDataItems,
+            ...allNetCashFlowDataItems,
+            ...allExpenseByPrimaryCategoryDataItems
+        ];
+
+        return {
+            totalIncome: totalIncome,
+            totalExpense: totalExpense,
+            items: allDataItems
+        };
     });
 
     const accountTotalAmountAnalysisData = computed<WritableTransactionCategoricalAnalysisData | null>(() => {
@@ -296,9 +556,11 @@ export const useStatisticsStore = defineStore('statistics', () => {
     const categoricalAnalysisData = computed<TransactionCategoricalAnalysisData>(() => {
         let combinedData: WritableTransactionCategoricalAnalysisData | null = null;
 
-        if (transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseByAccount.type ||
+        if (transactionStatisticsFilter.value.chartDataType === ChartDataType.OutflowsByAccount.type ||
+            transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseByAccount.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseByPrimaryCategory.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseBySecondaryCategory.type ||
+            transactionStatisticsFilter.value.chartDataType === ChartDataType.InflowsByAccount.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.IncomeByAccount.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.IncomeByPrimaryCategory.type ||
             transactionStatisticsFilter.value.chartDataType === ChartDataType.IncomeBySecondaryCategory.type) {
@@ -311,17 +573,38 @@ export const useStatisticsStore = defineStore('statistics', () => {
         const allStatisticsItems: TransactionCategoricalAnalysisDataItem[] = [];
 
         if (combinedData && combinedData.items) {
+            let maxTotalAmount = 0;
+
+            for (const dataItem of values(combinedData.items)) {
+                if (dataItem.totalAmount > maxTotalAmount) {
+                    maxTotalAmount = dataItem.totalAmount;
+                }
+            }
+
             for (const dataItem of values(combinedData.items)) {
                 let percent = 0;
 
-                if (dataItem.totalAmount > 0) {
-                    percent = dataItem.totalAmount * 100 / combinedData.totalNonNegativeAmount;
-                } else {
-                    percent = 0;
-                }
+                if (transactionStatisticsFilter.value.chartDataType === ChartDataType.OutflowsByAccount.type ||
+                    transactionStatisticsFilter.value.chartDataType === ChartDataType.InflowsByAccount.type) {
+                    if (maxTotalAmount > 0) {
+                        percent = dataItem.totalAmount * 100 / maxTotalAmount;
+                    } else {
+                        percent = 0;
+                    }
 
-                if (percent < 0) {
-                    percent = 0;
+                    if (percent < 0) {
+                        percent = 0;
+                    }
+                } else {
+                    if (dataItem.totalAmount > 0) {
+                        percent = dataItem.totalAmount * 100 / combinedData.totalNonNegativeAmount;
+                    } else {
+                        percent = 0;
+                    }
+
+                    if (percent < 0) {
+                        percent = 0;
+                    }
                 }
 
                 const statisticDataItem: TransactionCategoricalAnalysisDataItem = {
@@ -426,6 +709,42 @@ export const useStatisticsStore = defineStore('statistics', () => {
         return trendsData;
     });
 
+    function createNewTransactionCategoricalOverviewAnalysisDataItem(id: string, name: string, type: TransactionCategoricalOverviewAnalysisDataItemType, displayOrders: number[], hidden: boolean): TransactionCategoricalOverviewAnalysisDataItem {
+        const dataItem: TransactionCategoricalOverviewAnalysisDataItem = {
+            id: id,
+            name: name,
+            type: type,
+            displayOrders: displayOrders,
+            hidden: hidden,
+            inflows: [],
+            outflows: [],
+            totalAmount: 0,
+            totalNonNegativeAmount: 0
+        };
+
+        return dataItem;
+    }
+
+    function sortCategoricalOverviewAnalysisDataItems(items: TransactionCategoricalOverviewAnalysisDataItem[], transactionStatisticsFilter: TransactionStatisticsFilter): void {
+        let totalNonNegativeAmount: number = 0;
+
+        for (const item of items) {
+            totalNonNegativeAmount += item.totalNonNegativeAmount;
+        }
+
+        if (totalNonNegativeAmount > 0) {
+            for (const item of items) {
+                if (!item.includeInPercent) {
+                    continue;
+                }
+
+                item.percent = item.totalAmount * 100 / totalNonNegativeAmount;
+            }
+        }
+
+        sortStatisticsItems(items, transactionStatisticsFilter.sortingType);
+    }
+
     function assembleAccountAndCategoryInfo(items: TransactionStatisticResponseItem[]): TransactionStatisticResponseItemWithInfo[] {
         const finalItems: TransactionStatisticResponseItemWithInfo[] = [];
         const defaultCurrency = userStore.currentUserDefaultCurrency;
@@ -434,6 +753,8 @@ export const useStatisticsStore = defineStore('statistics', () => {
             const item: TransactionStatisticResponseItemWithInfo = {
                 categoryId: dataItem.categoryId,
                 accountId: dataItem.accountId,
+                relatedAccountId: dataItem.relatedAccountId,
+                relatedAccountType: dataItem.relatedAccountType,
                 amount: dataItem.amount,
                 amountInDefaultCurrency: null
             };
@@ -446,6 +767,16 @@ export const useStatisticsStore = defineStore('statistics', () => {
                 item.primaryAccount = accountsStore.allAccountsMap[item.account.parentId];
             } else {
                 item.primaryAccount = item.account;
+            }
+
+            if (item.relatedAccountId) {
+                item.relatedAccount = accountsStore.allAccountsMap[item.relatedAccountId];
+            }
+
+            if (item.relatedAccount && item.relatedAccount.parentId !== '0') {
+                item.relatedPrimaryAccount = accountsStore.allAccountsMap[item.relatedAccount.parentId];
+            } else {
+                item.relatedPrimaryAccount = item.relatedAccount;
             }
 
             if (item.categoryId) {
@@ -486,11 +817,29 @@ export const useStatisticsStore = defineStore('statistics', () => {
                 continue;
             }
 
-            if (transactionStatisticsFilter.chartDataType === ChartDataType.ExpenseByAccount.type ||
+            if (transactionStatisticsFilter.chartDataType === ChartDataType.OutflowsByAccount.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.TotalOutflows.type) {
+                if (item.category.type === CategoryType.Transfer) {
+                    if (item.relatedAccountType !== TransactionRelatedAccountType.TransferTo) {
+                        continue;
+                    }
+                } else if (item.category.type !== CategoryType.Expense) {
+                    continue;
+                }
+            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.ExpenseByAccount.type ||
                 transactionStatisticsFilter.chartDataType === ChartDataType.ExpenseByPrimaryCategory.type ||
                 transactionStatisticsFilter.chartDataType === ChartDataType.ExpenseBySecondaryCategory.type ||
                 transactionStatisticsFilter.chartDataType === ChartDataType.TotalExpense.type) {
                 if (item.category.type !== CategoryType.Expense) {
+                    continue;
+                }
+            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.InflowsByAccount.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.TotalInflows.type) {
+                if (item.category.type === CategoryType.Transfer) {
+                    if (item.relatedAccountType !== TransactionRelatedAccountType.TransferFrom) {
+                        continue;
+                    }
+                } else if (item.category.type !== CategoryType.Income) {
                     continue;
                 }
             } else if (transactionStatisticsFilter.chartDataType === ChartDataType.IncomeByAccount.type ||
@@ -500,8 +849,12 @@ export const useStatisticsStore = defineStore('statistics', () => {
                 if (item.category.type !== CategoryType.Income) {
                     continue;
                 }
-            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalBalance.type) {
+            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.NetCashFlow.type) {
                 // Do Nothing
+            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.NetIncome.type) {
+                if (item.category.type === CategoryType.Transfer) {
+                    continue;
+                }
             } else {
                 continue;
             }
@@ -514,7 +867,9 @@ export const useStatisticsStore = defineStore('statistics', () => {
                 continue;
             }
 
-            if (transactionStatisticsFilter.chartDataType === ChartDataType.ExpenseByAccount.type ||
+            if (transactionStatisticsFilter.chartDataType === ChartDataType.OutflowsByAccount.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.ExpenseByAccount.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.InflowsByAccount.type ||
                 transactionStatisticsFilter.chartDataType === ChartDataType.IncomeByAccount.type) {
                 if (isNumber(item.amountInDefaultCurrency)) {
                     let data = allDataItems[item.account.id];
@@ -534,10 +889,22 @@ export const useStatisticsStore = defineStore('statistics', () => {
                         };
                     }
 
-                    totalAmount += item.amountInDefaultCurrency;
+                    let includeInTotal: boolean = true;
 
-                    if (item.amountInDefaultCurrency > 0) {
-                        totalNonNegativeAmount += item.amountInDefaultCurrency;
+                    // total outflows / inflows do not include transfer transactions between unfiltered accounts
+                    if (transactionStatisticsFilter.chartDataType === ChartDataType.OutflowsByAccount.type ||
+                        transactionStatisticsFilter.chartDataType === ChartDataType.InflowsByAccount.type) {
+                        if (item.relatedAccount && (!transactionStatisticsFilter.filterAccountIds || !transactionStatisticsFilter.filterAccountIds[item.relatedAccount.id])) {
+                            includeInTotal = false;
+                        }
+                    }
+
+                    if (includeInTotal) {
+                        totalAmount += item.amountInDefaultCurrency;
+
+                        if (item.amountInDefaultCurrency > 0) {
+                            totalNonNegativeAmount += item.amountInDefaultCurrency;
+                        }
                     }
 
                     allDataItems[item.account.id] = data;
@@ -598,29 +965,49 @@ export const useStatisticsStore = defineStore('statistics', () => {
 
                     allDataItems[item.category.id] = data;
                 }
-            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalExpense.type ||
+            } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalOutflows.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.TotalExpense.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.TotalInflows.type ||
                 transactionStatisticsFilter.chartDataType === ChartDataType.TotalIncome.type ||
-                transactionStatisticsFilter.chartDataType === ChartDataType.TotalBalance.type) {
+                transactionStatisticsFilter.chartDataType === ChartDataType.NetCashFlow.type ||
+                transactionStatisticsFilter.chartDataType === ChartDataType.NetIncome.type) {
                 if (isNumber(item.amountInDefaultCurrency)) {
                     let data = allDataItems['total'];
                     let amount = item.amountInDefaultCurrency;
+                    let includeInTotal: boolean = true;
 
-                    if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalBalance.type &&
+                    if (transactionStatisticsFilter.chartDataType === ChartDataType.NetCashFlow.type &&
+                        (item.category.type === CategoryType.Expense || (item.category.type === CategoryType.Transfer && item.relatedAccountType === TransactionRelatedAccountType.TransferTo))) {
+                        amount = -amount;
+                    } else if (transactionStatisticsFilter.chartDataType === ChartDataType.NetIncome.type &&
                         item.category.type === CategoryType.Expense) {
                         amount = -amount;
                     }
 
-                    if (data) {
-                        data.totalAmount += amount;
-                    } else {
+                    // total outflows / inflows do not include transfer transactions between unfiltered accounts
+                    if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalOutflows.type ||
+                        transactionStatisticsFilter.chartDataType === ChartDataType.TotalInflows.type ||
+                        transactionStatisticsFilter.chartDataType === ChartDataType.NetCashFlow.type) {
+                        if (item.relatedAccount && (!transactionStatisticsFilter.filterAccountIds || !transactionStatisticsFilter.filterAccountIds[item.relatedAccount.id])) {
+                            includeInTotal = false;
+                        }
+                    }
+
+                    if (!data) {
                         let name = '';
 
-                        if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalExpense.type) {
+                        if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalOutflows.type) {
+                            name = ChartDataType.TotalOutflows.name;
+                        } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalExpense.type) {
                             name = ChartDataType.TotalExpense.name;
+                        } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalInflows.type) {
+                            name = ChartDataType.TotalInflows.name;
                         } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalIncome.type) {
                             name = ChartDataType.TotalIncome.name;
-                        } else if (transactionStatisticsFilter.chartDataType === ChartDataType.TotalBalance.type) {
-                            name = ChartDataType.TotalBalance.name;
+                        } else if (transactionStatisticsFilter.chartDataType === ChartDataType.NetCashFlow.type) {
+                            name = ChartDataType.NetCashFlow.name;
+                        } else if (transactionStatisticsFilter.chartDataType === ChartDataType.NetIncome.type) {
+                            name = ChartDataType.NetIncome.name;
                         }
 
                         data = {
@@ -631,14 +1018,18 @@ export const useStatisticsStore = defineStore('statistics', () => {
                             color: '',
                             hidden: false,
                             displayOrders: [1],
-                            totalAmount: amount
+                            totalAmount: 0
                         };
                     }
 
-                    totalAmount += amount;
+                    if (includeInTotal) {
+                        data.totalAmount += amount;
 
-                    if (item.amountInDefaultCurrency > 0) {
-                        totalNonNegativeAmount += amount;
+                        totalAmount += amount;
+
+                        if (item.amountInDefaultCurrency > 0) {
+                            totalNonNegativeAmount += amount;
+                        }
                     }
 
                     allDataItems['total'] = data;
@@ -700,7 +1091,7 @@ export const useStatisticsStore = defineStore('statistics', () => {
             transactionStatisticsFilter.value.categoricalChartType = settingsStore.appSettings.statistics.defaultCategoricalChartType;
         }
 
-        if (transactionStatisticsFilter.value.categoricalChartType !== CategoricalChartType.Pie.type && transactionStatisticsFilter.value.categoricalChartType !== CategoricalChartType.Bar.type) {
+        if (!CategoricalChartType.isValidType(transactionStatisticsFilter.value.categoricalChartType)) {
             transactionStatisticsFilter.value.categoricalChartType = CategoricalChartType.Default.type;
         }
 
@@ -745,7 +1136,7 @@ export const useStatisticsStore = defineStore('statistics', () => {
             transactionStatisticsFilter.value.trendChartType = settingsStore.appSettings.statistics.defaultTrendChartType;
         }
 
-        if (transactionStatisticsFilter.value.trendChartType !== TrendChartType.Area.type && transactionStatisticsFilter.value.trendChartType !== TrendChartType.Column.type) {
+        if (!TrendChartType.isValidType(transactionStatisticsFilter.value.trendChartType)) {
             transactionStatisticsFilter.value.trendChartType = TrendChartType.Default.type;
         }
 
@@ -982,7 +1373,50 @@ export const useStatisticsStore = defineStore('statistics', () => {
             querys.push('type=3');
         }
 
-        if (itemId && (transactionStatisticsFilter.value.chartDataType === ChartDataType.IncomeByAccount.type
+        if (itemId && transactionStatisticsFilter.value.chartDataType === ChartDataType.Overview.type) {
+            const items = itemId.split('-');
+            const sourceItems = (items[0] || '').split(':');
+            const queryAccountIds: string[] = [];
+            const queryCategoryIds: string[] = [];
+
+            if (sourceItems.length === 2) {
+                if (sourceItems[0] === 'account') {
+                    queryAccountIds.push(sourceItems[1] as string);
+                } else if (sourceItems[0] === 'category') {
+                    queryCategoryIds.push(sourceItems[1] as string);
+                }
+            }
+
+            if (items.length === 2) {
+                const targetItems = (items[1] || '').split(':');
+
+                if (targetItems.length === 2) {
+                    if (targetItems[0] === 'account') {
+                        queryAccountIds.push(targetItems[1] as string);
+                    } else if (targetItems[0] === 'category') {
+                        queryCategoryIds.push(targetItems[1] as string);
+                    }
+                }
+            }
+
+            if (queryAccountIds.length) {
+                if (queryAccountIds.length === 2) {
+                    querys.push('type=4');
+                }
+
+                querys.push('accountIds=' + queryAccountIds.join(','));
+            } else {
+                querys.push('accountIds=' + getFinalAccountIdsByFilteredAccountIds(accountsStore.allAccountsMap, transactionStatisticsFilter.value.filterAccountIds));
+            }
+
+            if (queryCategoryIds.length) {
+                querys.push('categoryIds=' + queryCategoryIds.join(','));
+            } else {
+                querys.push('categoryIds=' + getFinalCategoryIdsByFilteredCategoryIds(transactionCategoriesStore.allTransactionCategoriesMap, transactionStatisticsFilter.value.filterCategoryIds));
+            }
+        } else if (itemId && (transactionStatisticsFilter.value.chartDataType === ChartDataType.InflowsByAccount.type
+            || transactionStatisticsFilter.value.chartDataType === ChartDataType.IncomeByAccount.type
+            || transactionStatisticsFilter.value.chartDataType === ChartDataType.OutflowsByAccount.type
             || transactionStatisticsFilter.value.chartDataType === ChartDataType.ExpenseByAccount.type
             || transactionStatisticsFilter.value.chartDataType === ChartDataType.AccountTotalAssets.type
             || transactionStatisticsFilter.value.chartDataType === ChartDataType.AccountTotalLiabilities.type)) {
@@ -1134,6 +1568,7 @@ export const useStatisticsStore = defineStore('statistics', () => {
         transactionStatisticsStateInvalid,
         // computed states
         categoricalAnalysisChartDataCategory,
+        categoricalOverviewAnalysisData,
         categoricalAnalysisData,
         trendsAnalysisData,
         // functions

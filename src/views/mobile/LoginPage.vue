@@ -9,11 +9,12 @@
             <f7-block-footer>{{ tips }}</f7-block-footer>
         </f7-list>
 
-        <f7-list form dividers class="margin-bottom-half">
+        <f7-list form dividers class="margin-bottom-half" v-if="isInternalAuthEnabled()">
             <f7-list-input
                 type="text"
                 autocomplete="username"
                 clear-button
+                :disabled="loggingInByPassword || loggingInByOAuth2"
                 :label="tt('Username')"
                 :placeholder="tt('Your username or email')"
                 v-model:value="username"
@@ -23,6 +24,7 @@
                 type="password"
                 autocomplete="current-password"
                 clear-button
+                :disabled="loggingInByPassword || loggingInByOAuth2"
                 :label="tt('Password')"
                 :placeholder="tt('Your password')"
                 v-model:value="password"
@@ -35,28 +37,36 @@
             <f7-list-item>
                 <template #title>
                     <small>
-                        <f7-link external :href="getDesktopVersionPath()">{{ tt('Switch to Desktop Version') }}</f7-link>
+                        <f7-link external :class="{ 'disabled': loggingInByPassword || loggingInByOAuth2 }" :href="getDesktopVersionPath()">{{ tt('Switch to Desktop Version') }}</f7-link>
                     </small>
                 </template>
                 <template #after>
                     <small>
-                        <f7-link :class="{'disabled': !isUserForgetPasswordEnabled()}" @click="forgetPasswordEmail = ''; showForgetPasswordSheet = true">{{ tt('Forget Password?') }}</f7-link>
+                        <f7-link :class="{ 'disabled': !isUserForgetPasswordEnabled() || loggingInByPassword || loggingInByOAuth2 }" @click="forgetPasswordEmail = ''; showForgetPasswordSheet = true">{{ tt('Forget Password?') }}</f7-link>
                     </small>
                 </template>
             </f7-list-item>
         </f7-list>
 
         <f7-list class="margin-vertical-half">
-            <f7-list-button :class="{ 'disabled': inputIsEmpty || logining }" :text="tt('Log In')" @click="login"></f7-list-button>
-            <f7-block-footer>
+            <f7-list-button :class="{ 'disabled': inputIsEmpty || loggingInByPassword || loggingInByOAuth2 }" :text="tt('Log In')"
+                            @click="login" v-if="isInternalAuthEnabled()"></f7-list-button>
+            <f7-list-item class="login-divider display-flex align-items-center" v-if="isInternalAuthEnabled() && isOAuth2Enabled()">
+                <hr class="margin-inline-end-half" />
+                <small>{{ tt('or') }}</small>
+                <hr class="margin-inline-start-half" />
+            </f7-list-item>
+            <f7-list-button external :class="{ 'disabled': loggingInByPassword || loggingInByOAuth2 }" :href="oauth2LoginUrl" :text="oauth2LoginDisplayName"
+                            @click="loginByOAuth2" v-if="isOAuth2Enabled()"></f7-list-button>
+            <f7-block-footer v-if="isInternalAuthEnabled()">
                 <span>{{ tt('Don\'t have an account?') }}</span>&nbsp;
-                <f7-link :class="{'disabled': !isUserRegistrationEnabled()}" href="/signup" :text="tt('Create an account')"></f7-link>
+                <f7-link :class="{ 'disabled': !isUserRegistrationEnabled() || loggingInByPassword || loggingInByOAuth2 }" href="/signup" :text="tt('Create an account')"></f7-link>
             </f7-block-footer>
             <f7-block-footer class="padding-bottom">
             </f7-block-footer>
         </f7-list>
 
-        <language-select-button />
+        <language-select-button :disabled="loggingInByPassword || loggingInByOAuth2" />
 
         <f7-list class="login-page-bottom">
             <f7-block-footer>
@@ -176,7 +186,15 @@ import { useRootStore } from '@/stores/index.ts';
 
 import { APPLICATION_LOGO_PATH } from '@/consts/asset.ts';
 import { KnownErrorCode } from '@/consts/api.ts';
-import { isUserRegistrationEnabled, isUserForgetPasswordEnabled, isUserVerifyEmailEnabled } from '@/lib/server_settings.ts';
+
+import { generateRandomUUID } from '@/lib/misc.ts';
+import {
+    isUserRegistrationEnabled,
+    isUserForgetPasswordEnabled,
+    isUserVerifyEmailEnabled,
+    isInternalAuthEnabled,
+    isOAuth2Enabled
+} from '@/lib/server_settings.ts';
 import { getDesktopVersionPath } from '@/lib/version.ts';
 import { useI18nUIComponents, showLoading, hideLoading, isModalShowing } from '@/lib/ui/mobile.ts';
 
@@ -197,13 +215,17 @@ const {
     backupCode,
     tempToken,
     twoFAVerifyType,
-    logining,
+    oauth2ClientSessionId,
+    loggingInByPassword,
+    loggingInByOAuth2,
     verifying,
     inputIsEmpty,
     twoFAInputIsEmpty,
+    oauth2LoginUrl,
+    oauth2LoginDisplayName,
     tips,
     doAfterLogin
-} = useLoginPageBase();
+} = useLoginPageBase('mobile');
 
 const forgetPasswordEmail = ref<string>('');
 const resendVerifyEmail = ref<string>('');
@@ -241,17 +263,17 @@ function login(): void {
         return;
     }
 
-    logining.value = true;
+    loggingInByPassword.value = true;
     resendVerifyEmail.value = '';
     hasValidEmailVerifyToken.value = false;
     currentPasswordForResendVerifyEmail.value = '';
-    showLoading(() => logining.value);
+    showLoading(() => loggingInByPassword.value);
 
     rootStore.authorize({
         loginName: username.value,
         password: password.value
     }).then(authResponse => {
-        logining.value = false;
+        loggingInByPassword.value = false;
         hideLoading();
 
         if (authResponse.need2FA) {
@@ -263,7 +285,7 @@ function login(): void {
         doAfterLogin(authResponse);
         router.refreshPage();
     }).catch(error => {
-        logining.value = false;
+        loggingInByPassword.value = false;
         hideLoading();
 
         if (isUserVerifyEmailEnabled() && error.error && error.error.errorCode === KnownErrorCode.UserEmailNotVerified && error.error.context && error.error.context.email) {
@@ -286,6 +308,11 @@ function loginByPressEnter(): void {
     }
 
     return login();
+}
+
+function loginByOAuth2(): void {
+    loggingInByOAuth2.value = true;
+    showLoading();
 }
 
 function verify(): void {
@@ -389,4 +416,33 @@ function switch2FAVerifyType(): void {
         twoFAVerifyType.value = 'passcode';
     }
 }
+
+oauth2ClientSessionId.value = generateRandomUUID();
 </script>
+
+<style>
+.login-divider > .item-content {
+    width: 100%;
+    min-height: 0;
+
+    > .item-inner {
+        padding-top: 0;
+        padding-bottom: 0;
+        min-height: 0;
+
+        > small {
+            opacity: 0.7;
+        }
+
+        > hr {display: block;
+            flex: 1 1 100%;
+            height: 0;
+            max-height: 0;
+            border-style: solid;
+            border-width: thin 0 0 0;
+            opacity: 0.12;
+            transition: inherit;
+        }
+    }
+}
+</style>

@@ -58,7 +58,8 @@ interface MonthlyTrendsChartDataItem {
     selected: boolean;
     type: string;
     areaStyle?: object;
-    stack: string;
+    stack?: string;
+    symbolSize?: (data: number) => number;
     animation: boolean;
     data: number[];
 }
@@ -152,6 +153,7 @@ const allDisplayDateRanges = computed<string[]>(() => {
 
 const allSeries = computed<MonthlyTrendsChartDataItem[]>(() => {
     const allSeries: MonthlyTrendsChartDataItem[] = [];
+    let maxAmount: number = 0;
 
     for (const [item, index] of itemAndIndex(props.items)) {
         if (props.hiddenField && item[props.hiddenField]) {
@@ -208,6 +210,10 @@ const allSeries = computed<MonthlyTrendsChartDataItem[]>(() => {
                 }
             }
 
+            if (amount > maxAmount) {
+                maxAmount = amount;
+            }
+
             allAmounts.push(amount);
         }
 
@@ -219,15 +225,25 @@ const allSeries = computed<MonthlyTrendsChartDataItem[]>(() => {
             },
             selected: true,
             type: 'line',
-            stack: 'a',
             animation: !props.skeleton,
             data: allAmounts
         };
+
+        if (props.stacked) {
+            finalItem.stack = 'a';
+        } else if (props.idField && item[props.idField]) {
+            finalItem.stack = item[props.idField] as string;
+        }
 
         if (props.type === TrendChartType.Area.type) {
             finalItem.areaStyle = {};
         } else if (props.type === TrendChartType.Column.type) {
             finalItem.type = 'bar';
+        } else if (props.type === TrendChartType.Bubble.type) {
+            finalItem.type = 'scatter';
+            finalItem.symbolSize = (data: number): number => {
+                return Math.sqrt(data) / Math.sqrt(maxAmount) * 80 + 5;
+            }
         }
 
         allSeries.push(finalItem);
@@ -300,6 +316,7 @@ const chartOptions = computed<object>(() => {
             formatter: (params: CallbackDataParams[]) => {
                 let tooltip = '';
                 let totalAmount = 0;
+                let actualDisplayItemCount = 0;
                 const displayItems: MonthlyTrendsChartTooltipItem[] = [];
 
                 for (const param of params) {
@@ -327,12 +344,13 @@ const chartOptions = computed<object>(() => {
                         tooltip += '<div><span class="chart-pointer" style="background-color: ' + item.color + '"></span>';
                         tooltip += `<span>${item.name}</span><span class="ms-5" style="float: inline-end">${value}</span><br/>`;
                         tooltip += '</div>';
+                        actualDisplayItemCount++;
                     }
                 }
 
                 if (props.showTotalAmountInTooltip) {
                     const displayTotalAmount = formatAmountToLocalizedNumeralsWithCurrency(totalAmount, props.defaultCurrency);
-                    tooltip = '<div style="border-bottom: ' + (isDarkMode.value ? '#eee' : '#333') + ' dashed 1px">'
+                    tooltip = (actualDisplayItemCount > 0 ? '<div style="border-bottom: ' + (isDarkMode.value ? '#eee' : '#333') + ' dashed 1px">' : '<div></div>')
                         + '<span class="chart-pointer" style="background-color: ' + (isDarkMode.value ? '#eee' : '#333') + '"></span>'
                         + `<span>${tt('Total Amount')}</span><span class="ms-5" style="float: inline-end">${displayTotalAmount}</span><br/>`
                         + '</div>' + tooltip;
@@ -347,6 +365,8 @@ const chartOptions = computed<object>(() => {
         },
         legend: {
             orient: 'horizontal',
+            type: 'scroll',
+            top: 0,
             data: allSeries.value.map(item => item.name),
             selected: selectedLegends.value,
             textStyle: {
@@ -358,19 +378,24 @@ const chartOptions = computed<object>(() => {
         },
         grid: {
             left: yAxisWidth.value,
-            right: 20
+            right: 20,
+            bottom: 40
         },
         xAxis: [
             {
                 type: 'category',
                 data: allDisplayDateRanges.value,
-                inverse: textDirection.value === TextDirection.RTL
+                inverse: textDirection.value === TextDirection.RTL,
+                axisLabel: {
+                    color: isDarkMode.value ? '#888' : '#666'
+                }
             }
         ],
         yAxis: [
             {
                 type: 'value',
                 axisLabel: {
+                    color: isDarkMode.value ? '#888' : '#666',
                     formatter: (value: string) => {
                         return formatAmountToLocalizedNumeralsWithCurrency(parseInt(value), props.defaultCurrency);
                     }
@@ -475,13 +500,13 @@ defineExpose({
 <style scoped>
 .monthly-trends-chart-container {
     width: 100%;
-    height: 560px;
+    height: 720px;
     margin-top: 10px;
 }
 
 @media (min-width: 600px) {
     .monthly-trends-chart-container {
-        height: 600px;
+        height: 760px;
     }
 }
 </style>
